@@ -1,0 +1,22 @@
+{
+  "input": {
+    "demand": [
+      {
+        "location": 0,
+        "material": 0,
+        "time": 0,
+        "quantity": 10.0
+      }
+    ]
+  },
+  "aps_plan": [
+    {
+      "type": 1,
+      "location": 0,
+      "material": 0,
+      "time": 0,
+      "method_id": 0,
+      "quantity": 10.0
+    }
+  ]
+}

@@ -7,14 +7,15 @@ from typing import List, Dict, Any
 import json
 import os
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 # --- Config ---
 config = {
-    'num_token_types': 5,
+    'num_token_types': 9,
     'num_locations': 10,
     'num_time_steps': 20,
     'num_materials': 30,
-    'num_methods': 10,
+    'num_methods': 30,
     'd_model': 128,
     'n_heads': 4,
     'd_ff': 256,
@@ -35,6 +36,10 @@ class SCMEmbedding(nn.Module):
         self.time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
         self.mat_emb = nn.Embedding(config['num_materials'], config['d_model'])
         self.method_emb = nn.Embedding(config['num_methods'], config['d_model'])
+        self.route_emb = nn.Embedding(10, config['d_model'])
+        self.op_emb = nn.Embedding(20, config['d_model'])
+        self.resource_emb = nn.Embedding(20, config['d_model'])
+
         self.quantity_proj = nn.Sequential(
             nn.Linear(1, config['d_model']),
             nn.ReLU(),
@@ -49,7 +54,13 @@ class SCMEmbedding(nn.Module):
         e_mat = self.mat_emb(tokens['material'])
         e_method = self.method_emb(tokens['method_id'])
         e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
-        emb = e_type + e_loc + e_time + e_mat + e_method + e_qty
+
+        e_route = self.route_emb(tokens['route_id'])
+        e_op = self.op_emb(tokens['op_id'])
+        e_res = self.resource_emb(tokens['resource_id'])
+
+        emb = e_type + e_loc + e_time + e_mat + e_method + e_qty + e_route + e_op + e_res
+
         return self.dropout(emb)
 
 class SCMTransformerModel(nn.Module):
@@ -92,7 +103,8 @@ class SCMDataset(Dataset):
 
     def __getitem__(self, idx):
         entry = self.data[idx]
-        input_tokens = encode_tokens(generate_candidate_tokens(entry["input"]))
+        candidate_tokens = generate_candidate_tokens(entry["input"])
+        input_tokens = encode_tokens(candidate_tokens)
         label_plan = { (a['type'], a['location'], a['material'], a['time'], a['method_id']): a['quantity'] for a in entry['aps_plan'] }
 
         targets = []
@@ -126,11 +138,11 @@ def simulate_execution(plan: List[Dict[str, Any]]) -> Dict[str, float]:
         key = (step['location'], step['material'])
         qty = step['quantity']
         inventory[key] = inventory.get(key, 0.0) + qty
-        if step['type'] == 1:  # produce
+        if step['type'] == 1:
             cost += qty * 1.0
-        elif step['type'] == 2:  # ship
+        elif step['type'] == 2:
             cost += qty * 0.5
-        elif step['type'] == 3:  # purchase
+        elif step['type'] == 3:
             cost += qty * 1.2
     return {'inventory': inventory, 'cost': cost}
 
@@ -174,12 +186,163 @@ def train_model(model, dataloader, config):
             total_loss += loss.item()
         print(f"Epoch {epoch+1}/{config['epochs']} - Loss: {total_loss:.4f}")
 
-# --- Prediction Function ---
+# --- Plot Attention Heatmap ---
+def plot_attention_heatmap(attn_weights, title="Attention Heatmap"):
+    avg_attn = attn_weights.mean(0).numpy()
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(avg_attn, cmap="viridis")
+    plt.title(title)
+    plt.xlabel("Key Tokens")
+    plt.ylabel("Query Tokens")
+    plt.tight_layout()
+    plt.show()
+
+# --- Generate and Encode Tokens ---
+def generate_candidate_tokens(input_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    bom_edges, route_defs, op_defs, res_defs = [], [], [], []
+    if os.path.exists("bom_links.json"):
+        with open("bom_links.json", "r") as f:
+            bom_edges = json.load(f)
+    if os.path.exists("route_defs.json"):
+        with open("route_defs.json", "r") as f:
+            route_defs = json.load(f)
+    if os.path.exists("operation_defs.json"):
+        with open("operation_defs.json", "r") as f:
+            op_defs = json.load(f)
+    if os.path.exists("resource_defs.json"):
+        with open("resource_defs.json", "r") as f:
+            res_defs = json.load(f)
+
+    candidates = []
+    for loc in range(config['num_locations']):
+        for method in range(config['num_methods']):
+            mat = method % config['num_materials']
+            candidates.append({
+                "type": 1,
+                "location": loc,
+                "time": 0,
+                "material": mat,
+                "method_id": method,
+                "quantity": 0.0,
+                "route_id": 0,
+                "op_id": 0,
+                "resource_id": 0
+            })
+
+    for d in input_data.get("demand", []):
+        candidates.append({
+            "type": 4,
+            "location": d["location"],
+            "time": d["time"],
+            "material": d["material"],
+            "method_id": 0,
+            "quantity": d["quantity"],
+            "route_id": 0,
+            "op_id": 0,
+            "resource_id": 0
+        })
+
+    for edge in bom_edges:
+        candidates.append({
+            "type": 5,
+            "location": 0,
+            "time": 0,
+            "material": edge["from_material"],
+            "method_id": edge["to_material"],
+            "quantity": 0.0,
+            "route_id": 0,
+            "op_id": 0,
+            "resource_id": 0
+        })
+
+    for route in route_defs:
+        candidates.append({
+            "type": 6,
+            "location": 0,
+            "time": 0,
+            "material": 0,
+            "method_id": route["method_id"],
+            "quantity": route["route_id"],
+            "route_id": route["route_id"],
+            "op_id": 0,
+            "resource_id": 0
+        })
+
+    for op in op_defs:
+        candidates.append({
+            "type": 7,
+            "location": 0,
+            "time": op["duration"],
+            "material": op["resource_id"],
+            "method_id": op["route_id"],
+            "quantity": op["op_id"],
+            "route_id": op["route_id"],
+            "op_id": op["op_id"],
+            "resource_id": op["resource_id"]
+        })
+
+    for res in res_defs:
+        candidates.append({
+            "type": 8,
+            "location": 0,
+            "time": 0,
+            "material": res["resource_id"],
+            "method_id": 0,
+            "quantity": res["capacity"],
+            "route_id": 0,
+            "op_id": 0,
+            "resource_id": res["resource_id"]
+        })
+
+    return candidates
+
+
+def encode_tokens(token_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    def to_tensor(field, dtype=torch.long):
+        return torch.tensor([t.get(field, 0) for t in token_list], dtype=dtype)
+
+    return {
+        "type": to_tensor("type"),
+        "location": to_tensor("location"),
+        "time": to_tensor("time"),
+        "material": to_tensor("material"),
+        "method_id": to_tensor("method_id"),
+        "quantity": to_tensor("quantity", dtype=torch.float),
+        "route_id": to_tensor("route_id"),
+        "op_id": to_tensor("op_id"),
+        "resource_id": to_tensor("resource_id"),
+    }
+
+# --- Attention Summary and Prediction ---
+def print_attention_summary(model, tokens):
+    hooks = []
+    attention_maps = []
+
+    def save_attention_hook(module, input, output):
+        if hasattr(module, 'attn_output_weights'):
+            attention_maps.append(module.attn_output_weights.detach().cpu())
+
+    for i, layer in enumerate(model.encoder.layers):
+        hooks.append(layer.self_attn.register_forward_hook(save_attention_hook))
+
+    with torch.no_grad():
+        attention_mask = torch.ones(tokens['type'].shape, dtype=torch.bool)
+        model(tokens, attention_mask)
+
+    for h in hooks:
+        h.remove()
+
+    if attention_maps:
+        plot_attention_heatmap(attention_maps[0], "Transformer Attention (Layer 0)")
+
+    return attention_maps
+
+# --- Predict Plan ---
 def predict_plan(model, input_data: Dict[str, Any], threshold=1.0) -> List[Dict[str, Any]]:
     model.eval()
-
     token_list = generate_candidate_tokens(input_data)
     tokens = encode_tokens(token_list)
+    print_attention_summary(model, tokens)
     attention_mask = torch.ones(tokens['type'].shape, dtype=torch.bool)
 
     with torch.no_grad():
@@ -188,117 +351,41 @@ def predict_plan(model, input_data: Dict[str, Any], threshold=1.0) -> List[Dict[
     plan = []
     for tok, qty in zip(token_list, predictions.tolist()):
         if qty > threshold:
-            tok["quantity"] = qty
+            tok['quantity'] = qty
             plan.append(tok)
 
     return plan
 
-def generate_candidate_tokens(input_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    candidates = []
-    for loc in range(config['num_locations']):
-        for method in range(config['num_methods']):
-            mat = method % config['num_materials']
-            candidates.append({
-                "type": 1,  # produce
-                "location": loc,
-                "time": 0,
-                "material": mat,
-                "method_id": method,
-                "quantity": 0.0
-            })
-    for d in input_data.get("demand", []):
-        candidates.append({
-            "type": 4,  # demand
-            "location": d["location"],
-            "time": d["time"],
-            "material": d["material"],
-            "method_id": 0,
-            "quantity": d["quantity"]
-        })
-    return candidates
-    
-def encode_tokens(token_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-    def to_tensor(field):
-        return torch.tensor([t[field] for t in token_list], dtype=torch.long)
-    return {
-        "type": to_tensor("type"),
-        "location": to_tensor("location"),
-        "time": to_tensor("time"),
-        "material": to_tensor("material"),
-        "method_id": to_tensor("method_id"),
-        "quantity": torch.tensor([t.get("quantity", 0.0) for t in token_list], dtype=torch.float)
-    }
-
-# --- Sample Unit Tests ---
-def run_unit_tests():
-    print("Running unit tests...")
-
-    sample_input = {
-        "demand": [
-            {"location": 0, "material": 0, "time": 0, "quantity": 10.0},
-            {"location": 1, "material": 2, "time": 1, "quantity": 5.0}
-        ]
-    }
-
-    plan = predict_plan(model, sample_input, threshold=0.0)
-    assert isinstance(plan, list), "Output should be a list"
-    assert all("quantity" in p for p in plan), "Each plan step must include quantity"
-    print(f"Generated {len(plan)} plan steps. ✔️")
-
-    sim_result = simulate_execution(plan)
-    assert 'cost' in sim_result, "Sim result must include cost"
-    assert isinstance(sim_result['inventory'], dict), "Inventory should be a dictionary"
-    print(f"Simulated cost: {sim_result['cost']:.2f}. ✔️")
-
-# --- Sample JSON Logs ---
-def create_sample_log_files():
-    os.makedirs("logs", exist_ok=True)
-    for i in range(3):
-        sample = {
-            "input": {
-                "demand": [
-                    {"location": 0, "material": i, "time": 0, "quantity": 10.0 + i}
-                ]
-            },
-            "aps_plan": [
-                {"type": 1, "location": 0, "material": i, "time": 0, "method_id": 0, "quantity": 10.0 + i}
-            ]
-        }
-        with open(f"logs/sample_{i}.json", "w") as f:
-            json.dump(sample, f, indent=2)
-
-# (All previous definitions remain unchanged...)
-
-# --- Example Usage ---
 if __name__ == "__main__":
-# --- Example Usage ---
-    create_sample_log_files()
-    
+    # Load model
     model = SCMTransformerModel(config)
 
-    run_unit_tests()
-
-    # Train
+    # Create dataset and dataloader
     dataset = SCMDataset("logs")
     dataloader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
+
+    # Train the model
     train_model(model, dataloader, config)
+
+    # Save the trained model
     save_model(model, config['checkpoint_path'])
 
-    # Predict and evaluate
+    # Example prediction
     dummy_input_data = {
         "demand": [{"location": 0, "material": 1, "time": 0, "quantity": 20.0}]
     }
     transformer_plan = predict_plan(model, dummy_input_data)
 
-    # Stub APS plan for comparison (replace with real APS output)
+    # Simulate cost
     aps_plan = [{"type": 1, "location": 0, "material": 1, "time": 0, "method_id": 0, "quantity": 18.0}]
-
-    # Simulate and compare
     sim_aps = simulate_execution(aps_plan)
     sim_trans = simulate_execution(transformer_plan)
     print("APS Cost:", sim_aps['cost'])
     print("Transformer Cost:", sim_trans['cost'])
+
+    # Compare plans
     compare_plans(aps_plan, transformer_plan)
 
+    # Print transformer plan
     for step in transformer_plan:
         print(step)

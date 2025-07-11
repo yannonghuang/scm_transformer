@@ -478,7 +478,7 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5):
         'ref_id': torch.tensor([[0]], dtype=torch.long),
         'depends_on': torch.tensor([[0]], dtype=torch.long),
 
-        'token_type_id': torch.tensor([[0]], dtype=torch.long),
+        #'token_type_id': torch.tensor([[0]], dtype=torch.long),
     }
 
     plan = []

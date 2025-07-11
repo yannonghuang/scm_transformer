@@ -1,3 +1,4 @@
 data/
 logs/
 scm_model.pt
+scm_transformer.pt

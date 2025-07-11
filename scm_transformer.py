@@ -11,6 +11,7 @@ import os
 import pandas as pd
 from pathlib import Path
 
+
 # --- Config ---
 config = {
     'num_token_types': 9,
@@ -72,36 +73,6 @@ class SCMEmbedding(nn.Module):
 
         return self.dropout(e_type + e_loc + e_time + e_mat + e_method + e_qty + e_toktype)
     
-# --- Embedding Module (Updated) ---
-class _SCMEmbedding(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.type_emb = nn.Embedding(config['num_token_types'], config['d_model'])
-        self.loc_emb = nn.Embedding(config['num_locations'], config['d_model'])
-        self.time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
-        self.mat_emb = nn.Embedding(config['num_materials'], config['d_model'])
-        self.method_emb = nn.Embedding(config['num_methods'], config['d_model'])
-
-        self.token_type_emb = nn.Embedding(3, config['d_model'])  # 0=static, 1=demand, 2=plan
-
-        self.quantity_proj = nn.Sequential(
-            nn.Linear(1, config['d_model']),
-            nn.ReLU(),
-            nn.LayerNorm(config['d_model'])
-        )
-        self.dropout = nn.Dropout(config['dropout'])
-
-    def forward(self, tokens):
-        e_type = self.type_emb(tokens['type'])
-        e_loc = self.loc_emb(tokens['location'])
-        e_time = self.time_emb(tokens['time'])
-        e_mat = self.mat_emb(tokens['material'])
-        e_method = self.method_emb(tokens['method_id'])
-        e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
-        e_toktype = self.token_type_emb(tokens['token_type_id'])
-
-        return self.dropout(e_type + e_loc + e_time + e_mat + e_method + e_qty + e_toktype)
-
 
 # --- Transformer Model ---
 class SCMTransformerModel(nn.Module):
@@ -192,88 +163,6 @@ def encode_tokens(token_list, token_type_id=1):
     }
 
 
-
-# --- Dataset ---
-class _SCMDataset(Dataset):
-    def __init__(self, data_dir):
-        self.samples = []
-        for file in os.listdir(data_dir):
-            if file.endswith(".json"):
-                with open(os.path.join(data_dir, file), 'r') as f:
-                    self.samples.append(json.load(f))
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        entry = self.samples[idx]
-        src = encode_tokens(generate_candidate_tokens(entry["input"]))
-
-        tgt_tokens = entry["aps_plan"]["revised_demand"] + entry["aps_plan"]["work_orders"]
-        tgt_input_tokens = tgt_tokens[:-1]
-        tgt_label_tokens = tgt_tokens[1:] if len(tgt_tokens) > 1 else tgt_tokens
-
-        tgt = encode_tokens(tgt_input_tokens)
-        labels = {
-            'material': torch.tensor([t["material"] for t in tgt_label_tokens]),
-            'location': torch.tensor([t["location"] for t in tgt_label_tokens]),
-            'start_time': torch.tensor([t.get("start_time", 0) for t in tgt_label_tokens]),
-            'end_time': torch.tensor([t.get("end_time", 0) for t in tgt_label_tokens]),
-            'quantity': torch.tensor([t["quantity"] for t in tgt_label_tokens], dtype=torch.float),
-            'ref_id': torch.tensor([
-                t.get("ref_id") if t.get("ref_id") is not None else -1
-                for t in tgt_label_tokens
-            ]),
-            'depends_on': torch.tensor([
-                t.get("depends_on") if t.get("depends_on") is not None else -1
-                for t in tgt_label_tokens
-            ]),
-            'id': torch.tensor([
-                t.get("id") if t.get("id") is not None else -1
-                for t in tgt_label_tokens
-            ])
-        }
-
-        return src, tgt, labels
-
-# --- load csv datasets ---
-import pandas as pd
-from pathlib import Path
-
-
-def load_csv_sample(sample_dir):
-    demand_df = pd.read_csv(sample_dir / "demands.csv")
-    updated_df = pd.read_csv(sample_dir / "updated_demands.csv")
-    workorders_df = pd.read_csv(sample_dir / "workorders.csv")
-
-    # Demand input: list of dicts with keys: location, material, time, quantity
-    input_demand = [
-        {
-            "location": int(row["location_id"]),
-            "material": int(row["material_id"]),
-            "time": int(row["request_time"]),
-            "quantity": float(row["quantity"])
-        }
-        for _, row in demand_df.iterrows()
-    ]
-
-    # Target (APS) plan = workorders list of dicts
-    target_plan = [
-        {
-            "material_id": int(row["material_id"]),
-            "location_id": int(row["location_id"]),
-            "start_time": int(row["start_time"]),
-            "end_time": int(row["end_time"]),
-            "quantity": float(row["quantity"])
-        }
-        for _, row in workorders_df.iterrows()
-    ]
-
-    return {
-        "input": {"demand": input_demand},
-        "tgt": target_plan
-    }
-
 # --- Training ---
 def train():
     dataset = SCMDataset("data/logs")
@@ -336,28 +225,7 @@ class SCMDataset(Dataset):
             #"token_type_id": torch.full((1, len(df)), 0, dtype=torch.long),  # input = 0
             "token_type_id": torch.zeros((len(df)), dtype=torch.long),  # input = 0
         }
-
         return tokens
-
-    def _load_plan(self, path):
-        df = pd.read_csv(path)
-        tokens = {
-            "type": torch.zeros((1, len(df)), dtype=torch.long),  # dummy or inferred
-            "location": torch.tensor(df["location_id"].values, dtype=torch.long).unsqueeze(0),
-            "material": torch.tensor(df["material_id"].values, dtype=torch.long).unsqueeze(0),
-            "time": torch.tensor(df["start_time"].values, dtype=torch.long).unsqueeze(0),
-            "method_id": torch.zeros((1, len(df)), dtype=torch.long),  # dummy or inferred
-            "quantity": torch.tensor(df["quantity"].values, dtype=torch.float).unsqueeze(0),
-            "token_type_id": torch.full((1, len(df)), 2, dtype=torch.long),  # plan = 2
-        }
-        labels = {
-            "material": tokens["material"].clone(),
-            "location": tokens["location"].clone(),
-            "start_time": torch.tensor(df["start_time"].values, dtype=torch.long).unsqueeze(0),
-            "end_time": torch.tensor(df["end_time"].values, dtype=torch.long).unsqueeze(0),
-            "quantity": tokens["quantity"].clone(),
-        }
-        return tokens, labels
 
     def load_plan(self, path):
         df = pd.read_csv(path)
@@ -413,143 +281,6 @@ def update_config_from_static_data(config, logs_root="data/logs"):
 def train_stepwise():
     update_config_from_static_data(config)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SCMTransformerModel(config).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
-
-    dataset = SCMDataset("data/logs")
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
-
-    model.train()
-    for epoch in range(config['epochs']):
-        total_loss = 0.0
-        for src, tgt, labels in dataloader:
-            # Move everything to device
-            src = {k: v.to(device) for k, v in src.items()}
-            tgt = {k: v.to(device) for k, v in tgt.items()}
-            labels = {k: v.to(device) for k, v in labels.items()}
-
-            tgt_len = tgt['material'].shape[1]
-
-            # Initialize tgt_tokens with a dummy BOS token (all zeros)
-            tgt_tokens = {
-                'type': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'location': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'material': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'time': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'method_id': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'quantity': torch.zeros((1, 1), dtype=torch.float, device=device),
-                'token_type_id': torch.full((1, 1), 2, dtype=torch.long, device=device),  # Plan tokens
-            }
-
-            loss_accum = 0.0
-            for t in range(tgt_len):
-                pred = model(src, tgt_tokens)
-                last_pred = {k: v[:, -1] for k, v in pred.items()}
-
-                loss = (
-                    3.0 * F.cross_entropy(last_pred['material'], labels['material'][:, t]) +
-                    3.0 * F.cross_entropy(last_pred['location'], labels['location'][:, t]) +
-                    1.0 * F.cross_entropy(last_pred['start_time'], labels['start_time'][:, t]) +
-                    1.0 * F.cross_entropy(last_pred['end_time'], labels['end_time'][:, t]) +
-                    1.0 * F.mse_loss(last_pred['quantity'], labels['quantity'][:, t])
-                )
-
-                loss_accum += loss
-
-                # Append ground truth target token for next step (teacher forcing)
-                for key in ['type', 'location', 'material', 'time', 'method_id', 'quantity']:
-                    val = tgt[key][:, t].unsqueeze(1)
-                    tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
-
-                # Ensure token_type_id is correctly appended
-                tgt_tokens['token_type_id'] = torch.cat([
-                    tgt_tokens['token_type_id'], torch.full((1, 1), 2, dtype=torch.long, device=device)
-                ], dim=1)
-
-            optimizer.zero_grad()
-            loss_accum.backward()
-            optimizer.step()
-            total_loss += loss_accum.item()
-
-        print(f"Epoch {epoch+1}/{config['epochs']} - Stepwise Loss: {total_loss:.4f}")
-
-    torch.save(model.state_dict(), config['checkpoint_path'])
-    print(f"✅ Model saved to {config['checkpoint_path']}")
-
-def _train_stepwise():
-    update_config_from_static_data(config)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SCMTransformerModel(config).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
-
-    dataset = SCMDataset("data/logs")
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
-
-    model.train()
-    for epoch in range(config['epochs']):
-        total_loss = 0.0
-        for src, tgt, labels in dataloader:
-            # Move everything to device
-            src = {k: v.to(device) for k, v in src.items()}
-            tgt = {k: v.to(device) for k, v in tgt.items()}
-            labels = {k: v.to(device) for k, v in labels.items()}
-
-            tgt_len = tgt['material'].shape[1]
-
-            # Initialize tgt_tokens with a dummy BOS token (all zeros)
-            tgt_tokens = {
-                'type': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'location': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'material': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'time': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'method_id': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'quantity': torch.zeros((1, 1), dtype=torch.float, device=device),
-                'token_type_id': torch.full((1, 1), 2, dtype=torch.long, device=device),  # Plan tokens
-            }
-
-            loss_accum = 0.0
-            for t in range(tgt_len):
-                pred = model(src, tgt_tokens)
-                last_pred = {k: v[:, -1] for k, v in pred.items()}
-
-                if last_pred["material"].dim() == 1:
-                    last_pred["material"] = last_pred["material"].unsqueeze(0)
-
-                loss = (
-                    #3.0 * F.cross_entropy(last_pred['material'], labels['material'][0, t].argmax(dim=-1).unsqueeze(0)) +
-                    3.0 * F.cross_entropy(last_pred['material'], labels['material'][0, t].unsqueeze(0)) +
-                    3.0 * F.cross_entropy(last_pred['location'], labels['location'][0, t].argmax(dim=-1).unsqueeze(0)) +
-                    1.0 * F.cross_entropy(last_pred['start_time'], labels['start_time'][0, t].argmax(dim=-1).unsqueeze(0)) +
-                    1.0 * F.cross_entropy(last_pred['end_time'], labels['end_time'][0, t].argmax(dim=-1).unsqueeze(0)) +
-                    1.0 * F.mse_loss(last_pred['quantity'], labels['quantity'][0, t].unsqueeze(0))
-                )
-
-                loss_accum += loss
-
-                # Append ground truth target token for next step (teacher forcing)
-                for key in ['type', 'location', 'material', 'time', 'method_id', 'quantity']:
-                    val = tgt[key][:, t].unsqueeze(1)
-                    tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
-
-                # Ensure token_type_id is correctly appended
-                tgt_tokens['token_type_id'] = torch.cat([
-                    tgt_tokens['token_type_id'], torch.full((1, 1), 2, dtype=torch.long, device=device)
-                ], dim=1)
-
-            optimizer.zero_grad()
-            loss_accum.backward()
-            optimizer.step()
-            total_loss += loss_accum.item()
-
-        print(f"Epoch {epoch+1}/{config['epochs']} - Stepwise Loss: {total_loss:.4f}")
-
-    torch.save(model.state_dict(), config['checkpoint_path'])
-    print(f"✅ Model saved to {config['checkpoint_path']}")
-
-# --- Optimized and Fixed Stepwise Training ---
-def _train_stepwise():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SCMTransformerModel(config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])

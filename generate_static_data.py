@@ -7,7 +7,7 @@ import argparse
 random.seed(42)
 
 # --- Configuration ---
-NUM_MATERIALS = 2000
+NUM_MATERIALS = 10
 NUM_LOCATIONS = 4
 MAX_CHILDREN = 3
 MAKE_PROB = 0.8
@@ -68,14 +68,14 @@ if not static_flag:
     method_id = 0
     for mat in range(NUM_MATERIALS):
         for loc in range(NUM_LOCATIONS):
-            if mat in leaves and random.random() < PURCHASE_PROB:
+            if mat in leaves: # and random.random() < PURCHASE_PROB:
                 methods.append({
                     'id': method_id, 'type': 'purchase', 'material_id': mat,
                     'lead_time': random.randint(1, 5), 'location_id': loc,
                     'target_location_id': None, 'route_id': None, 'bom_id': None
                 })
                 method_id += 1
-            if mat not in leaves and random.random() < MAKE_PROB:
+            if mat not in leaves: # and random.random() < MAKE_PROB:
                 methods.append({
                     'id': method_id, 'type': 'make', 'material_id': mat,
                     'lead_time': random.randint(1, 5), 'location_id': loc,

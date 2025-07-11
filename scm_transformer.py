@@ -16,7 +16,7 @@ from pathlib import Path
 config = {
     'num_token_types': 9,
     'num_locations': 10,
-    'num_time_steps': 20,
+    'num_time_steps': 70,
     'num_materials': 30,
     'num_methods': 30,
     'd_model': 128,
@@ -38,6 +38,10 @@ class SCMEmbedding(nn.Module):
         self.type_emb = nn.Embedding(config['num_token_types'], config['d_model'])
         self.loc_emb = nn.Embedding(config['num_locations'], config['d_model'])
         self.time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
+
+        self.start_time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
+        self.end_time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
+
         self.mat_emb = nn.Embedding(config['num_materials'], config['d_model'])
         self.method_emb = nn.Embedding(config['num_methods'], config['d_model'])
 
@@ -52,7 +56,8 @@ class SCMEmbedding(nn.Module):
 
     def forward(self, tokens):
         # Ensure shape: [batch_size, seq_len]
-        for k in ['type', 'location', 'material', 'time', 'method_id', 'token_type_id']:
+        #for k in ['type', 'location', 'material', 'time', 'method_id', 'token_type_id']:
+        for k in ['type', 'location', 'material', 'time', 'start_time', 'end_time', 'method_id']:
             if tokens[k].dim() == 1:
                 tokens[k] = tokens[k].unsqueeze(0)
             elif tokens[k].dim() == 3:
@@ -69,9 +74,10 @@ class SCMEmbedding(nn.Module):
         e_mat = self.mat_emb(tokens['material'])
         e_method = self.method_emb(tokens['method_id'])
         e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
-        e_toktype = self.token_type_emb(tokens['token_type_id'])
+        #e_toktype = self.token_type_emb(tokens['token_type_id'])
 
-        return self.dropout(e_type + e_loc + e_time + e_mat + e_method + e_qty + e_toktype)
+        #return self.dropout(e_type + e_loc + e_time + e_mat + e_method + e_qty + e_toktype)
+        return self.dropout(e_type + e_loc + e_time + e_mat + e_method + e_qty)
     
 
 # --- Transformer Model ---
@@ -142,6 +148,10 @@ def generate_candidate_tokens(input_dict):
             "location": d["location"],
             "material": d["material"],
             "time": d["time"],
+
+            "start_time": d["start_time"],
+            "end_time": d["end_time"],
+
             "method_id": 0,
             "quantity": d["quantity"]
         })
@@ -157,6 +167,10 @@ def encode_tokens(token_list, token_type_id=1):
         'location': to_tensor("location"),
         'material': to_tensor("material"),
         'time': to_tensor("time"),
+
+        'start_time': to_tensor("start_time"),
+        'end_time': to_tensor("end_time"),
+
         'method_id': to_tensor("method_id"),
         'quantity': to_tensor("quantity", dtype=torch.float),
         'token_type_id': torch.tensor([token_type_id] * len(token_list), dtype=torch.long)
@@ -205,8 +219,11 @@ class SCMDataset(Dataset):
     def __getitem__(self, idx):
         sample_dir = self.sample_dirs[idx]
         src = self.load_demand(sample_dir / "demands.csv")
-        tgt, labels = self.load_plan(sample_dir / "workorders.csv")
-        return src, tgt, labels
+
+        #tgt, labels = self.load_plan(sample_dir / "workorders.csv")
+        #return src, tgt, labels
+        tokens = self.load_combined(sample_dir / "combined_output.csv")
+        return src, tokens, tokens
 
     def load_demand(self, path):
         df = pd.read_csv(path)
@@ -224,6 +241,9 @@ class SCMDataset(Dataset):
 
             #"token_type_id": torch.full((1, len(df)), 0, dtype=torch.long),  # input = 0
             "token_type_id": torch.zeros((len(df)), dtype=torch.long),  # input = 0
+
+            "start_time": torch.zeros((len(df)), dtype=torch.long),
+            "end_time": torch.zeros((len(df)), dtype=torch.long),
         }
         return tokens
 
@@ -260,12 +280,45 @@ class SCMDataset(Dataset):
         }
         return tokens, labels
     
+    def load_combined(self, path):
+        df = pd.read_csv(path)
+        num_bins = config['num_time_steps']
+
+        # Clip time values to avoid IndexError
+        #df["start_time"] = df["start_time"].clip(lower=0, upper=num_bins - 1).astype(int)
+        #df["end_time"] = df["end_time"].clip(lower=0, upper=num_bins - 1).astype(int)
+
+        tokens = {
+            #"type": torch.zeros((1, len(df)), dtype=torch.long),
+            "type": torch.zeros((len(df)), dtype=torch.long),
+
+            "location": torch.tensor(df["location_id"].values, dtype=torch.long), #.unsqueeze(0),
+            "material": torch.tensor(df["material_id"].values, dtype=torch.long), #.unsqueeze(0),
+            "time": torch.tensor(df["start_time"].values, dtype=torch.long), #.unsqueeze(0),
+
+            "request_time": torch.tensor(df["request_time"].values, dtype=torch.long),
+            "commit_time": torch.tensor(df["commit_time"].values, dtype=torch.long),
+
+            "start_time": torch.tensor(df["start_time"].values, dtype=torch.long), #.unsqueeze(0),
+            "end_time": torch.tensor(df["end_time"].values, dtype=torch.long), #.unsqueeze(0),
+
+            #"method_id": torch.zeros((1, len(df)), dtype=torch.long),
+            "method_id": torch.zeros((len(df)), dtype=torch.long),
+
+            "quantity": torch.tensor(df["quantity"].values, dtype=torch.float), #.unsqueeze(0),
+
+            #"token_type_id": torch.full((1, len(df)), 2, dtype=torch.long),
+            "token_type_id": torch.zeros((len(df)), dtype=torch.long),
+        }
+ 
+        return tokens
+    
 def update_config_from_static_data(config, logs_root="data/logs"):
     max_material = -1
     max_location = -1
 
     for sample_dir in Path(logs_root).glob("sample_*"):
-        for file_name in ["demands.csv", "workorders.csv"]:
+        for file_name in ["demands.csv", "combined_output.csv"]:
             fpath = sample_dir / file_name
             if fpath.exists():
                 df = pd.read_csv(fpath)
@@ -305,9 +358,13 @@ def train_stepwise():
                 'location': torch.zeros((1, 1), dtype=torch.long, device=device),
                 'material': torch.zeros((1, 1), dtype=torch.long, device=device),
                 'time': torch.zeros((1, 1), dtype=torch.long, device=device),
+                
+                'start_time': torch.zeros((1, 1), dtype=torch.long, device=device),
+                'end_time': torch.zeros((1, 1), dtype=torch.long, device=device),
+
                 'method_id': torch.zeros((1, 1), dtype=torch.long, device=device),
-                'quantity': torch.zeros((1, 1), dtype=torch.float, device=device),
-                'token_type_id': torch.full((1, 1), 2, dtype=torch.long, device=device),  # Plan tokens
+                'quantity': torch.zeros((1, 1), dtype=torch.float, device=device)
+                #'token_type_id': torch.full((1, 1), 2, dtype=torch.long, device=device),  # Plan tokens
             }
 
             loss_accum = 0.0
@@ -331,9 +388,9 @@ def train_stepwise():
                     tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
 
                 # Ensure token_type_id is correctly appended
-                tgt_tokens['token_type_id'] = torch.cat([
-                    tgt_tokens['token_type_id'], torch.full((1, 1), 2, dtype=torch.long, device=device)
-                ], dim=1)
+                #tgt_tokens['token_type_id'] = torch.cat([
+                #    tgt_tokens['token_type_id'], torch.full((1, 1), 2, dtype=torch.long, device=device)
+                #], dim=1)
 
             optimizer.zero_grad()
             loss_accum.backward()
@@ -411,6 +468,10 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5):
         'location': torch.tensor([[0]], dtype=torch.long),
         'material': torch.tensor([[0]], dtype=torch.long),
         'time': torch.tensor([[0]], dtype=torch.long),
+
+        'start_time': torch.tensor([[0]], dtype=torch.long),
+        'end_time': torch.tensor([[0]], dtype=torch.long),
+
         'method_id': torch.tensor([[0]], dtype=torch.long),
         'quantity': torch.tensor([[0.0]], dtype=torch.float),
         'id': torch.tensor([[0]], dtype=torch.long),
@@ -700,6 +761,8 @@ def generate_synthetic_data(n=10, out_dir="data/logs"):
 
 # --- CLI Entrypoint ---
 def main():
+    update_config_from_static_data(config)
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--train_stepwise", action="store_true")
@@ -720,8 +783,7 @@ def main():
         input_example = {
             "input": {
                 "demand": [
-                    {"location": 0, "material": 1, "time": 0, "quantity": 15},
-                    {"location": 3, "material": 5, "time": 1, "quantity": 10}
+                    {"location": 1, "material": 6, "request_time": 6,  "time": 6, "start_time": 0, "end_time": 1, "quantity": 796},
                 ]
             },
             "tgt": []

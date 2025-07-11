@@ -70,13 +70,17 @@ def solve_demand(d, methods, bom, now):
         child_wos += c_wos
         if solved_c['commit_time'] is not None:
             commit_times.append(solved_c['commit_time'])
-
+        else:
+            d['commit_time'] = None
+            return d, []
+        
     start_time = max([req_time - method['lead_time'], *commit_times, now])
     end_time = start_time + method['lead_time']
 
     wo = create_work_order(method, start_time, end_time, quantity)
     d['commit_time'] = end_time
-    return d, child_wos + [wo]
+    #return d, child_wos + [wo]
+    return d, [wo] + child_wos
 
 # --- CLI Main ---
 def main():
@@ -94,17 +98,16 @@ def main():
     bom = load_bom(os.path.join(args.data_dir, 'bom.csv'))
     demands = load_demands(args.input)
 
-    solved_demands = []
-    all_workorders = []
+    rows = []
     now = 0
 
     for d in demands:
         solved_d, wos = solve_demand(d, methods, bom, now)
-        solved_demands.append(solved_d)
-        all_workorders += wos
+        rows.append({'type': 'demand', **solved_d})
+        for wo in wos:
+            rows.append({'type': 'workorder', **wo})
 
-    pd.DataFrame(solved_demands).to_csv(os.path.join(args.output, 'updated_demands.csv'), index=False)
-    pd.DataFrame(all_workorders).to_csv(os.path.join(args.output, 'workorders.csv'), index=False)
+    pd.DataFrame(rows).to_csv(os.path.join(args.output, 'combined_output.csv'), index=False)
     print("✅ Simulation complete. Outputs saved to:", args.output)
 
 if __name__ == '__main__':

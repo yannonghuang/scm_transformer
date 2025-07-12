@@ -26,7 +26,7 @@ config = {
     'dropout': 0.1,
     'batch_size': 8,
     'lr': 1e-4,
-    'epochs': 30,
+    'epochs': 10,
     'checkpoint_path': 'scm_transformer.pt',
     "max_train_samples": 1000
 }
@@ -57,7 +57,7 @@ class SCMEmbedding(nn.Module):
     def forward(self, tokens):
         # Ensure shape: [batch_size, seq_len]
         #for k in ['type', 'location', 'material', 'time', 'method_id', 'token_type_id']:
-        for k in ['type', 'location', 'material', 'time', 'start_time', 'end_time', 'method_id']:
+        for k in ['type', 'location', 'material', 'time', 'start_time', 'end_time']:
             if tokens[k].dim() == 1:
                 tokens[k] = tokens[k].unsqueeze(0)
             elif tokens[k].dim() == 3:
@@ -72,12 +72,12 @@ class SCMEmbedding(nn.Module):
         e_loc = self.loc_emb(tokens['location'])
         e_time = self.time_emb(tokens['time'])
         e_mat = self.mat_emb(tokens['material'])
-        e_method = self.method_emb(tokens['method_id'])
+        #e_method = self.method_emb(tokens['method_id'])
         e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
         #e_toktype = self.token_type_emb(tokens['token_type_id'])
 
         #return self.dropout(e_type + e_loc + e_time + e_mat + e_method + e_qty + e_toktype)
-        return self.dropout(e_type + e_loc + e_time + e_mat + e_method + e_qty)
+        return self.dropout(e_type + e_loc + e_time + e_mat + e_qty)
     
 
 # --- Transformer Model ---
@@ -111,9 +111,9 @@ class SCMTransformerModel(nn.Module):
         self.start_time_out = nn.Linear(d_model, config['num_time_steps'])
         self.end_time_out = nn.Linear(d_model, config['num_time_steps'])
         self.quantity_out = nn.Linear(d_model, 1)
-        self.method_out = nn.Linear(d_model, config['num_methods'])
-        self.ref_id_out = nn.Linear(d_model, 64)  # Assume 64 is max number of ref_ids
-        self.depends_on_out = nn.Linear(d_model, 64)  # Same assumption
+        #self.method_out = nn.Linear(d_model, config['num_methods'])
+        #self.ref_id_out = nn.Linear(d_model, 64)  # Assume 64 is max number of ref_ids
+        #self.depends_on_out = nn.Linear(d_model, 64)  # Same assumption
 
     def forward(self, src_tokens, tgt_tokens):
         src = self.embed(src_tokens)
@@ -129,9 +129,9 @@ class SCMTransformerModel(nn.Module):
             'start_time': self.start_time_out(decoded),
             'end_time': self.end_time_out(decoded),
             'quantity': self.quantity_out(decoded).squeeze(-1),
-            'method_id': self.method_out(decoded),
-            'ref_id': self.ref_id_out(decoded),
-            'depends_on': self.depends_on_out(decoded)
+            #'method_id': self.method_out(decoded),
+            #'ref_id': self.ref_id_out(decoded),
+            #'depends_on': self.depends_on_out(decoded)
         }
 
 
@@ -152,7 +152,7 @@ def generate_candidate_tokens(input_dict):
             "start_time": d["start_time"],
             "end_time": d["end_time"],
 
-            "method_id": 0,
+            #"method_id": 0,
             "quantity": d["quantity"]
         })
     return candidates
@@ -171,9 +171,9 @@ def encode_tokens(token_list, token_type_id=1):
         'start_time': to_tensor("start_time"),
         'end_time': to_tensor("end_time"),
 
-        'method_id': to_tensor("method_id"),
+        #'method_id': to_tensor("method_id"),
         'quantity': to_tensor("quantity", dtype=torch.float),
-        'token_type_id': torch.tensor([token_type_id] * len(token_list), dtype=torch.long)
+        #'token_type_id': torch.tensor([token_type_id] * len(token_list), dtype=torch.long)
     }
 
 
@@ -237,10 +237,10 @@ class SCMDataset(Dataset):
             "quantity": torch.tensor(df["quantity"].values, dtype=torch.float), #.unsqueeze(0),
 
             #"method_id": torch.zeros((1, len(df)), dtype=torch.long),  # dummy for input
-            "method_id": torch.zeros((len(df)), dtype=torch.long),  # dummy for input
+            #"method_id": torch.zeros((len(df)), dtype=torch.long),  # dummy for input
 
             #"token_type_id": torch.full((1, len(df)), 0, dtype=torch.long),  # input = 0
-            "token_type_id": torch.zeros((len(df)), dtype=torch.long),  # input = 0
+            #"token_type_id": torch.zeros((len(df)), dtype=torch.long),  # input = 0
 
             "start_time": torch.zeros((len(df)), dtype=torch.long),
             "end_time": torch.zeros((len(df)), dtype=torch.long),
@@ -264,7 +264,7 @@ class SCMDataset(Dataset):
             "time": torch.tensor(df["start_time"].values, dtype=torch.long), #.unsqueeze(0),
 
             #"method_id": torch.zeros((1, len(df)), dtype=torch.long),
-            "method_id": torch.zeros((len(df)), dtype=torch.long),
+            #"method_id": torch.zeros((len(df)), dtype=torch.long),
 
             "quantity": torch.tensor(df["quantity"].values, dtype=torch.float), #.unsqueeze(0),
 
@@ -303,12 +303,12 @@ class SCMDataset(Dataset):
             "end_time": torch.tensor(df["end_time"].values, dtype=torch.long), #.unsqueeze(0),
 
             #"method_id": torch.zeros((1, len(df)), dtype=torch.long),
-            "method_id": torch.zeros((len(df)), dtype=torch.long),
+            #"method_id": torch.zeros((len(df)), dtype=torch.long),
 
             "quantity": torch.tensor(df["quantity"].values, dtype=torch.float), #.unsqueeze(0),
 
             #"token_type_id": torch.full((1, len(df)), 2, dtype=torch.long),
-            "token_type_id": torch.zeros((len(df)), dtype=torch.long),
+            #"token_type_id": torch.zeros((len(df)), dtype=torch.long),
         }
  
         return tokens
@@ -332,8 +332,6 @@ def update_config_from_static_data(config, logs_root="data/logs"):
     print(f"🔧 Config updated: {config['num_materials']} materials, {config['num_locations']} locations")
 
 def train_stepwise():
-    update_config_from_static_data(config)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SCMTransformerModel(config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
@@ -362,7 +360,7 @@ def train_stepwise():
                 'start_time': torch.zeros((1, 1), dtype=torch.long, device=device),
                 'end_time': torch.zeros((1, 1), dtype=torch.long, device=device),
 
-                'method_id': torch.zeros((1, 1), dtype=torch.long, device=device),
+                #'method_id': torch.zeros((1, 1), dtype=torch.long, device=device),
                 'quantity': torch.zeros((1, 1), dtype=torch.float, device=device)
                 #'token_type_id': torch.full((1, 1), 2, dtype=torch.long, device=device),  # Plan tokens
             }
@@ -383,7 +381,8 @@ def train_stepwise():
                 loss_accum += loss
 
                 # Append ground truth target token for next step (teacher forcing)
-                for key in ['type', 'location', 'material', 'time', 'method_id', 'quantity']:
+                #for key in ['type', 'location', 'material', 'time', 'method_id', 'quantity']:
+                for key in ['type', 'location', 'material', 'time', 'quantity']:
                     val = tgt[key][:, t].unsqueeze(1)
                     tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
 
@@ -472,11 +471,11 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5):
         'start_time': torch.tensor([[0]], dtype=torch.long),
         'end_time': torch.tensor([[0]], dtype=torch.long),
 
-        'method_id': torch.tensor([[0]], dtype=torch.long),
+        #'method_id': torch.tensor([[0]], dtype=torch.long),
         'quantity': torch.tensor([[0.0]], dtype=torch.float),
         'id': torch.tensor([[0]], dtype=torch.long),
-        'ref_id': torch.tensor([[0]], dtype=torch.long),
-        'depends_on': torch.tensor([[0]], dtype=torch.long),
+        #'ref_id': torch.tensor([[0]], dtype=torch.long),
+        #'depends_on': torch.tensor([[0]], dtype=torch.long),
 
         #'token_type_id': torch.tensor([[0]], dtype=torch.long),
     }
@@ -510,18 +509,18 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5):
             q = float(q_raw[0]) if isinstance(q_raw, list) else float(q_raw)
 
             t = decode_val("type")
-            method = decode_val("method_id")
+            #method = decode_val("method_id")
 
-            ref_val = out.get("ref_id")
-            ref = decode_val("ref_id") if ref_val is not None else -1
+            #ref_val = out.get("ref_id")
+            #ref = decode_val("ref_id") if ref_val is not None else -1
 
-            dep_val = out.get("depends_on")
-            dep = decode_val("depends_on") if dep_val is not None else -1
+            #dep_val = out.get("depends_on")
+            #dep = decode_val("depends_on") if dep_val is not None else -1
 
-            if isinstance(ref, list):
-                ref = ref[0]
-            if isinstance(dep, list):
-                dep = dep[0]
+            #if isinstance(ref, list):
+            #    ref = ref[0]
+            #if isinstance(dep, list):
+            #    dep = dep[0]
 
         except Exception as err:
             print(f"❌ Error during decoding step {step}: {err}")
@@ -538,15 +537,17 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5):
             "end_time": e,
             "quantity": round(q, 2),
             "type": t,
-            "method_id": method,
-            "ref_id": ref,
-            "depends_on": dep if isinstance(dep, int) and dep >= 0 else None
+            #"method_id": method,
+            #"ref_id": ref,
+            #"depends_on": dep if isinstance(dep, int) and dep >= 0 else None
         }
         plan.append(work_order)
 
         for key, val in zip(
-            ['type', 'location', 'material', 'time', 'method_id', 'quantity', 'id', 'ref_id', 'depends_on'],
-            [t, l, m, s, method, q, next_id, ref, dep]
+            #['type', 'location', 'material', 'time', 'method_id', 'quantity', 'id', 'ref_id', 'depends_on'],
+            ['type', 'location', 'material', 'time', 'quantity', 'id'],
+            [t, l, m, s, q, next_id]
+            #[t, l, m, s, method, q, next_id, ref, dep]
         ):
             val_tensor = torch.tensor([[val]], dtype=torch.float if key == 'quantity' else torch.long)
             tgt_tokens[key] = torch.cat([tgt_tokens[key], val_tensor], dim=1)
@@ -573,7 +574,7 @@ def generate_static_tokens():
             "location": 0,
             "material": mat,
             "time": 0,
-            "method_id": 0,
+            #"method_id": 0,
             "quantity": 0.0
         })
 
@@ -584,7 +585,7 @@ def generate_static_tokens():
             "location": 0,
             "material": 0,
             "time": 0,
-            "method_id": method,
+            #"method_id": method,
             "quantity": 0.0
         })
 
@@ -656,108 +657,6 @@ def evaluate_plan(predicted: List[Dict], ground_truth: List[Dict]) -> None:
 
     print(f"\nTotal quantity diff: {total_diff:.2f}")
 
-# --- Generate Synthetic Data ---
-def generate_synthetic_data(n=10, out_dir="data/logs"):
-    import random, os, json
-    os.makedirs(out_dir, exist_ok=True)
-
-    def create_plan_chain(demand, chain_len=3, start_id=0):
-        plan_chain = []
-        current_time = demand["time"] - chain_len
-        prev_id = None
-        prev_mat = demand["material"]
-        prev_loc = demand["location"]
-
-        for i in range(chain_len):
-            method_id = random.randint(1, 2)  # 1 = make, 2 = move
-            current_id = start_id + i
-
-            mat = random.randint(0, config['num_materials'] - 1)
-            loc = random.randint(0, config['num_locations'] - 1)
-
-            plan_chain.append({
-                "id": current_id,
-                "type": 2,
-                "material": mat,
-                "location": loc,
-                "start_time": current_time,
-                "end_time": current_time + 1,
-                "quantity": round(demand["quantity"] / (chain_len + 1), 2),
-                "method_id": method_id,
-                "depends_on": prev_id
-            })
-
-            prev_id = current_id
-            prev_mat = mat
-            prev_loc = loc
-            current_time += 1
-
-        current_id = start_id + chain_len
-        plan_chain.append({
-            "id": current_id,
-            "type": 2,
-            "material": demand["material"],
-            "location": demand["location"],
-            "start_time": current_time,
-            "end_time": current_time + 1,
-            "quantity": round(demand["quantity"] / (chain_len + 1), 2),
-            "method_id": 1,
-            "depends_on": prev_id
-        })
-        return plan_chain, current_id + 1
-
-    for i in range(n):
-        input_demand = []
-        revised_demand = []
-        work_orders = []
-        next_id = 0
-
-        num_demands = random.randint(1, 3)
-        for demand_id in range(num_demands):
-            loc = random.randint(0, 9)
-            mat = random.randint(0, 29)
-            time = random.randint(5, 15)
-            qty = round(random.uniform(5, 20), 2)
-            demand = {"id": demand_id, "location": loc, "material": mat, "time": time, "quantity": qty}
-            input_demand.append(demand)
-
-            num_revised = random.randint(1, 2)
-            base_qty = round(qty / num_revised, 2)
-            split_qty = [base_qty] * num_revised
-            split_qty[-1] = round(qty - sum(split_qty[:-1]), 2)
-
-            for j in range(num_revised):
-                revised_time = time + random.randint(0, 2)
-                revised = {
-                    "id": next_id,
-                    "type": 1,
-                    "ref_id": demand_id,
-                    "location": loc,
-                    "material": mat,
-                    "time": revised_time,
-                    "quantity": split_qty[j]
-                }
-                revised_demand.append(revised)
-
-                plan_chain, next_id = create_plan_chain({
-                    "location": loc,
-                    "material": mat,
-                    "time": revised_time,
-                    "quantity": split_qty[j]
-                }, start_id=next_id)
-                work_orders.extend(plan_chain)
-
-        with open(os.path.join(out_dir, f"sample_{i:04}.json"), "w") as f:
-            json.dump({
-                "input": {"demand": input_demand},
-                "aps_plan": {
-                    "revised_demand": revised_demand,
-                    "work_orders": work_orders
-                }
-            }, f, indent=2)
-
-    print(f"✅ Generated {n} synthetic samples in {out_dir}")
-
 
 # --- CLI Entrypoint ---
 def main():
@@ -767,12 +666,11 @@ def main():
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--train_stepwise", action="store_true")
     parser.add_argument("--predict", action="store_true")
-    parser.add_argument("--data", action="store_true")
+
     args = parser.parse_args()
 
-    if args.data:
-        generate_synthetic_data()
-    elif args.train_stepwise:
+
+    if args.train_stepwise:
         train_stepwise()
     elif args.train:
         train()

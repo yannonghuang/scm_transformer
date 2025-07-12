@@ -13,8 +13,21 @@ from pathlib import Path
 
 
 # --- Config ---
+token_types = [
+    'demand',
+    'make',
+    'purchase',
+    'move',
+    'material',
+    'method',
+    'bom'
+]
+
+def get_token_type(t):
+    return token_types.index(t)
+
 config = {
-    'num_token_types': 9,
+    'num_token_types': len(token_types), #9,
     'num_locations': 10,
     'num_time_steps': 70,
     'num_materials': 30,
@@ -45,7 +58,7 @@ class SCMEmbedding(nn.Module):
         self.mat_emb = nn.Embedding(config['num_materials'], config['d_model'])
         self.method_emb = nn.Embedding(config['num_methods'], config['d_model'])
 
-        self.token_type_emb = nn.Embedding(3, config['d_model'])  # 0=static, 1=demand, 2=plan
+        #self.token_type_emb = nn.Embedding(3, config['d_model'])  # 0=static, 1=demand, 2=plan
 
         self.quantity_proj = nn.Sequential(
             nn.Linear(1, config['d_model']),

@@ -4,6 +4,8 @@ import pandas as pd
 import networkx as nx
 import argparse
 
+from scm_transformer import get_token_type
+
 random.seed(42)
 
 # --- Configuration ---
@@ -70,14 +72,14 @@ if not static_flag:
         for loc in range(NUM_LOCATIONS):
             if mat in leaves: # and random.random() < PURCHASE_PROB:
                 methods.append({
-                    'id': method_id, 'type': 'purchase', 'material_id': mat,
+                    'id': method_id, 'type': get_token_type('purchase'), 'material_id': mat,
                     'lead_time': random.randint(1, 5), 'location_id': loc,
                     'target_location_id': None, 'route_id': None, 'bom_id': None
                 })
                 method_id += 1
             if mat not in leaves: # and random.random() < MAKE_PROB:
                 methods.append({
-                    'id': method_id, 'type': 'make', 'material_id': mat,
+                    'id': method_id, 'type': get_token_type('make'), 'material_id': mat,
                     'lead_time': random.randint(1, 5), 'location_id': loc,
                     'target_location_id': None, 'route_id': None, 'bom_id': None
                 })
@@ -85,7 +87,7 @@ if not static_flag:
             if random.random() < MOVE_PROB:
                 tgt_loc = random.choice([l for l in range(NUM_LOCATIONS) if l != loc])
                 methods.append({
-                    'id': method_id, 'type': 'move', 'material_id': mat,
+                    'id': method_id, 'type': get_token_type('move'), 'material_id': mat,
                     'lead_time': random.randint(1, 5), 'location_id': loc,
                     'target_location_id': tgt_loc, 'route_id': None, 'bom_id': None
                 })

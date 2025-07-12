@@ -3,6 +3,8 @@ import os
 import pandas as pd
 from collections import defaultdict
 
+from scm_transformer import get_token_type
+
 # --- Loaders ---
 def load_csv(path):
     return pd.read_csv(path)
@@ -103,7 +105,7 @@ def main():
 
     for d in demands:
         solved_d, wos = solve_demand(d, methods, bom, now)
-        rows.append({'type': 'demand', **solved_d})
+        rows.append({'type': get_token_type('demand'), **solved_d})
         for wo in wos:
             rows.append({'type': 'workorder', **wo})
 

@@ -39,8 +39,8 @@ class SCMEmbedding(nn.Module):
         self.loc_emb = nn.Embedding(config['num_locations'], config['d_model'])
         self.time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
 
-        self.start_time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
-        self.end_time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
+        #self.start_time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
+        #self.end_time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
 
         self.mat_emb = nn.Embedding(config['num_materials'], config['d_model'])
         self.method_emb = nn.Embedding(config['num_methods'], config['d_model'])
@@ -71,13 +71,19 @@ class SCMEmbedding(nn.Module):
         e_type = self.type_emb(tokens['type'])
         e_loc = self.loc_emb(tokens['location'])
         e_time = self.time_emb(tokens['time'])
+
+        e_start_time = self.time_emb(tokens['start_time'])
+        e_end_time = self.time_emb(tokens['end_time'])
+        e_request_time = self.time_emb(tokens['request_time'])
+        e_commit_time = self.time_emb(tokens['commit_time'])
+
         e_mat = self.mat_emb(tokens['material'])
         #e_method = self.method_emb(tokens['method_id'])
         e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
         #e_toktype = self.token_type_emb(tokens['token_type_id'])
 
         #return self.dropout(e_type + e_loc + e_time + e_mat + e_method + e_qty + e_toktype)
-        return self.dropout(e_type + e_loc + e_time + e_mat + e_qty)
+        return self.dropout(e_type + e_loc + e_time + e_mat + e_qty + e_start_time + e_end_time + e_request_time + e_commit_time)
     
 
 # --- Transformer Model ---
@@ -108,8 +114,9 @@ class SCMTransformerModel(nn.Module):
         self.type_out = nn.Linear(d_model, config['num_token_types'])
         self.material_out = nn.Linear(d_model, config['num_materials'])
         self.location_out = nn.Linear(d_model, config['num_locations'])
-        self.start_time_out = nn.Linear(d_model, config['num_time_steps'])
-        self.end_time_out = nn.Linear(d_model, config['num_time_steps'])
+        self.time_out = nn.Linear(d_model, config['num_time_steps'])
+        #self.start_time_out = nn.Linear(d_model, config['num_time_steps'])
+        #self.end_time_out = nn.Linear(d_model, config['num_time_steps'])
         self.quantity_out = nn.Linear(d_model, 1)
         #self.method_out = nn.Linear(d_model, config['num_methods'])
         #self.ref_id_out = nn.Linear(d_model, 64)  # Assume 64 is max number of ref_ids
@@ -126,8 +133,10 @@ class SCMTransformerModel(nn.Module):
             'type': self.type_out(decoded),
             'material': self.material_out(decoded),
             'location': self.location_out(decoded),
-            'start_time': self.start_time_out(decoded),
-            'end_time': self.end_time_out(decoded),
+            'start_time': self.time_out(decoded),
+            'end_time': self.time_out(decoded),
+            'request_time': self.time_out(decoded),
+            'commit_time': self.time_out(decoded),            
             'quantity': self.quantity_out(decoded).squeeze(-1),
             #'method_id': self.method_out(decoded),
             #'ref_id': self.ref_id_out(decoded),
@@ -149,8 +158,10 @@ def generate_candidate_tokens(input_dict):
             "material": d["material"],
             "time": d["time"],
 
-            "start_time": d["start_time"],
-            "end_time": d["end_time"],
+            "start_time": 0,
+            "end_time": 0,
+            "request_time": 0,
+            "commit_time": 0,
 
             #"method_id": 0,
             "quantity": d["quantity"]
@@ -170,6 +181,8 @@ def encode_tokens(token_list, token_type_id=1):
 
         'start_time': to_tensor("start_time"),
         'end_time': to_tensor("end_time"),
+        'request_time': to_tensor("request_time"),
+        'commit_time': to_tensor("commit_time"),
 
         #'method_id': to_tensor("method_id"),
         'quantity': to_tensor("quantity", dtype=torch.float),
@@ -207,7 +220,6 @@ def train():
     torch.save(model.state_dict(), config['checkpoint_path'])
     print(f"✅ Model saved to {config['checkpoint_path']}")
 
-# --- csv sample datasets
 
 class SCMDataset(Dataset):
     def __init__(self, root_dir):
@@ -244,6 +256,8 @@ class SCMDataset(Dataset):
 
             "start_time": torch.zeros((len(df)), dtype=torch.long),
             "end_time": torch.zeros((len(df)), dtype=torch.long),
+            "request_time": torch.tensor(df["request_time"].values, dtype=torch.long),
+            "commit_time": torch.zeros((len(df)), dtype=torch.long),            
         }
         return tokens
 
@@ -359,6 +373,8 @@ def train_stepwise():
                 
                 'start_time': torch.zeros((1, 1), dtype=torch.long, device=device),
                 'end_time': torch.zeros((1, 1), dtype=torch.long, device=device),
+                'request_time': torch.zeros((1, 1), dtype=torch.long, device=device),
+                'commit_time': torch.zeros((1, 1), dtype=torch.long, device=device),
 
                 #'method_id': torch.zeros((1, 1), dtype=torch.long, device=device),
                 'quantity': torch.zeros((1, 1), dtype=torch.float, device=device)
@@ -375,6 +391,8 @@ def train_stepwise():
                     3.0 * F.cross_entropy(last_pred['location'], labels['location'][:, t]) +
                     1.0 * F.cross_entropy(last_pred['start_time'], labels['start_time'][:, t]) +
                     1.0 * F.cross_entropy(last_pred['end_time'], labels['end_time'][:, t]) +
+                    1.0 * F.cross_entropy(last_pred['request_time'], labels['request_time'][:, t]) +
+                    1.0 * F.cross_entropy(last_pred['commit_time'], labels['commit_time'][:, t]) +
                     1.0 * F.mse_loss(last_pred['quantity'], labels['quantity'][:, t])
                 )
 
@@ -382,7 +400,7 @@ def train_stepwise():
 
                 # Append ground truth target token for next step (teacher forcing)
                 #for key in ['type', 'location', 'material', 'time', 'method_id', 'quantity']:
-                for key in ['type', 'location', 'material', 'time', 'quantity']:
+                for key in ['type', 'location', 'material', 'time', 'start_time', 'end_time', 'request_time', 'commit_time', 'quantity']:
                     val = tgt[key][:, t].unsqueeze(1)
                     tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
 
@@ -441,9 +459,6 @@ def collate_batch(batch):
     return stack_dicts(src_batch, pad=True), stack_dicts(tgt_batch, pad=True), stack_dicts(label_batch, pad=True)
 
 
-# --- Main ---
-
-
 # --- Predict Plan ---
 def is_demand_balanced(demands, plan, tolerance=1e-2):
     from collections import defaultdict
@@ -470,6 +485,8 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5):
 
         'start_time': torch.tensor([[0]], dtype=torch.long),
         'end_time': torch.tensor([[0]], dtype=torch.long),
+        'request_time': torch.tensor([[0]], dtype=torch.long),
+        'commit_time': torch.tensor([[0]], dtype=torch.long),
 
         #'method_id': torch.tensor([[0]], dtype=torch.long),
         'quantity': torch.tensor([[0.0]], dtype=torch.float),
@@ -503,7 +520,9 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5):
             l = decode_val("location")
             s = decode_val("start_time")
             e = decode_val("end_time")
-            
+            r = decode_val("request_time")
+            c = decode_val("commit_time")
+
             #q = decode_val("quantity", use_argmax=False)
             q_raw = decode_val("quantity", use_argmax=False)
             q = float(q_raw[0]) if isinstance(q_raw, list) else float(q_raw)
@@ -535,6 +554,8 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5):
             "location_id": l,
             "start_time": s,
             "end_time": e,
+            "request_time": r,
+            "commit_time": c,            
             "quantity": round(q, 2),
             "type": t,
             #"method_id": method,
@@ -545,8 +566,8 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5):
 
         for key, val in zip(
             #['type', 'location', 'material', 'time', 'method_id', 'quantity', 'id', 'ref_id', 'depends_on'],
-            ['type', 'location', 'material', 'time', 'quantity', 'id'],
-            [t, l, m, s, q, next_id]
+            ['type', 'location', 'material', 'time', 'quantity', 'id', 'start_time', 'end_time', 'request_time', 'commit_time'],
+            [t, l, m, s, q, next_id, s, e, r, c]
             #[t, l, m, s, method, q, next_id, ref, dep]
         ):
             val_tensor = torch.tensor([[val]], dtype=torch.float if key == 'quantity' else torch.long)

@@ -4,18 +4,18 @@ import pandas as pd
 import networkx as nx
 import argparse
 
-from scm_transformer import get_token_type
+from scm_transformer import get_token_type, config
 
 random.seed(42)
 
 # --- Configuration ---
-NUM_MATERIALS = 10
+NUM_MATERIALS = config['num_materials'] #10
 NUM_LOCATIONS = 4
 MAX_CHILDREN = 3
 MAKE_PROB = 0.8
 PURCHASE_PROB = 0.8
 MOVE_PROB = 0.3
-NUM_DEMANDS = 100
+NUM_DEMANDS = config['num_demands'] #100
 REQUEST_TIME_RANGE = 10
 
 OUTDIR = 'data'
@@ -95,6 +95,23 @@ if not static_flag:
     methods_df = pd.DataFrame(methods)
     methods_df.to_csv(f"{OUTDIR}/method.csv", index=False)
 
+    # --- Compute BOM Depth for Each Material ---
+    depths = {}
+    for node in reversed(list(nx.topological_sort(G))):  # process from leaves up
+        children = list(G.successors(node))
+        if not children:
+            depths[node] = 0
+        else:
+            child_depths = [depths[c] for c in children if c in depths]
+            if len(child_depths) != len(children):
+                raise ValueError(f"Child depth missing for node {node}, children: {children}")
+            depths[node] = 1 + max(child_depths)
+    # Save BOM depth info
+    depth_df = pd.DataFrame([
+        {'material_id': m, 'bom_depth': d} for m, d in depths.items()
+    ])
+    depth_df.to_csv(f"{OUTDIR}/bom_depth.csv", index=False)
+
     # Cache leaves and roots for reuse
     with open(f"{OUTDIR}/roots.txt", "w") as f:
         f.write("\n".join(map(str, roots)))
@@ -105,21 +122,45 @@ else:
         roots = list(map(int, f.read().splitlines()))
 
 # --- Generate N Dynamic Samples ---
-for i in range(args.num_samples):
-    demands = pd.DataFrame({
-        'id': range(NUM_DEMANDS),
-        'material_id': random.choices(roots, k=NUM_DEMANDS),
-        'location_id': random.choices(range(NUM_LOCATIONS), k=NUM_DEMANDS),
-        'quantity': random.choices(range(1000), k=NUM_DEMANDS), #random.randint(0, 1000),
-        'request_time': random.choices(range(0, REQUEST_TIME_RANGE), k=NUM_DEMANDS),
-        'commit_time': [None]*NUM_DEMANDS
-    })
-    #sample_dir = f"{TOKENIZED}/sample_{i}"
-    sample_dir = f"{LOGDIR}/sample_{i}"
-    #demand_path = f"{LOGDIR}/demand_{i}.csv"
-    demand_path = f"{sample_dir}/demands.csv"
-    os.makedirs(sample_dir, exist_ok=True)
-    demands.to_csv(demand_path, index=False)
-    os.system(f"python simulate_solver.py --input {demand_path} --output {sample_dir}")
+# Load BOM depth info
+depth_df = pd.read_csv(f"{OUTDIR}/bom_depth.csv")
+depth_map = dict(zip(depth_df['material_id'], depth_df['bom_depth']))
+# Determine max BOM depth
+max_depth = max(depth_map.values())
+print(f"✅ Max depth: {max_depth}")
+if max_depth > args.num_samples:
+    raise ValueError(f"Number of samples should be no less than max_depth {max_depth}")
+#for i in range(args.num_samples):
+#samples_per_depth = max(1, args.num_samples // (max_depth + 1))
+sample_count = 0
+for target_depth in range(max_depth + 1):
+    #if sample_count >= args.num_samples:
+    #    break
+
+    # Filter root materials for current depth
+    eligible_roots = [m for m in roots if depth_map.get(m, 999) == target_depth]
+    if not eligible_roots:
+        continue
+
+    #num_to_generate = min(samples_per_depth, args.num_samples - sample_count)
+
+    #for _ in range(num_to_generate):
+    for i in range(args.num_samples):
+        demands = pd.DataFrame({
+            'demand_id': range(NUM_DEMANDS),
+            'material_id': random.choices(eligible_roots, k=NUM_DEMANDS),
+            'location_id': random.choices(range(NUM_LOCATIONS), k=NUM_DEMANDS),
+            'quantity': random.choices(range(1000), k=NUM_DEMANDS),
+            'request_time': random.choices(range(0, REQUEST_TIME_RANGE), k=NUM_DEMANDS),
+            'commit_time': [None]*NUM_DEMANDS
+        })
+        #sample_dir = f"{LOGDIR}/sample_{sample_count}/depth_{target_depth}"
+        sample_dir = f"{LOGDIR}/depth_{target_depth}/sample_{i}"
+        demand_path = f"{sample_dir}/demands.csv"
+        os.makedirs(sample_dir, exist_ok=True)
+        demands.to_csv(demand_path, index=False)
+        os.system(f"python simulate_solver.py --input {demand_path} --output {sample_dir}")
+        #sample_count += 1
 
 print(f"✅ Generated {args.num_samples} samples using shared static dataset.")
+

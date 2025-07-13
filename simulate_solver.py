@@ -32,8 +32,9 @@ def load_demands(path):
     return load_csv(path).to_dict(orient='records')
 
 # --- Work Order Creation ---
-def create_work_order(method, start_time, end_time, quantity):
+def create_work_order(demand_id, method, start_time, end_time, quantity):
     return {
+        'demand_id': demand_id,
         'type': method['type'],
         'material_id': method['material_id'],
         'location_id': method['location_id'],
@@ -47,6 +48,7 @@ def create_work_order(method, start_time, end_time, quantity):
 
 # --- Recursive Solver ---
 def solve_demand(d, methods, bom, now):
+    demand_id = d['demand_id']
     m_id = d['material_id']
     loc_id = d['location_id']
     req_time = d['request_time']
@@ -63,6 +65,7 @@ def solve_demand(d, methods, bom, now):
 
     for c in bom.get(m_id, []):
         c_demand = {
+            'demand_id': demand_id,
             'material_id': c,
             'location_id': method['location_id'],
             'request_time': max([req_time - method['lead_time'], now]), # req_time 
@@ -79,7 +82,7 @@ def solve_demand(d, methods, bom, now):
     start_time = max([req_time - method['lead_time'], *commit_times, now])
     end_time = start_time + method['lead_time']
 
-    wo = create_work_order(method, start_time, end_time, quantity)
+    wo = create_work_order(demand_id, method, start_time, end_time, quantity)
     d['commit_time'] = end_time
     #return d, child_wos + [wo]
     return d, [wo] + child_wos

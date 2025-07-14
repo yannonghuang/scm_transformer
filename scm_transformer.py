@@ -48,6 +48,21 @@ config = {
     "max_train_samples": 1000
 }
 
+bom_map = defaultdict(set)
+def load_bom(path="data/bom.csv") -> dict[int, set[int]]:
+    global bom_map
+    if bom_map is None or len(bom_map) == 0 :
+        bom = defaultdict(set)
+        with open(path, newline="") as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                parent = int(row["parent"])
+                child = int(row["child"])
+                bom[parent].add(child)
+        #return dict(bom)
+        bom_map = bom
+    return bom_map
+
 # --- Embedding Module (Updated) ---
 class SCMEmbedding(nn.Module):
     def __init__(self, config):
@@ -111,83 +126,9 @@ class SCMEmbedding(nn.Module):
         embeddings = (1 - is_bom) * e_combined + is_bom * e_bom
         return self.dropout(embeddings)
 
-class _SCMEmbedding(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.type_emb = nn.Embedding(config['num_token_types'], config['d_model'])
-        self.loc_emb = nn.Embedding(config['num_locations'], config['d_model'])
-        self.time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
-
-        #self.start_time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
-        #self.end_time_emb = nn.Embedding(config['num_time_steps'], config['d_model'])
-        self.demand_emb = nn.Embedding(config['num_demands'], config['d_model'])
-        self.mat_emb = nn.Embedding(config['num_materials'], config['d_model'])
-        self.method_emb = nn.Embedding(config['num_methods'], config['d_model'])
-
-        #self.token_type_emb = nn.Embedding(3, config['d_model'])  # 0=static, 1=demand, 2=plan
-
-        self.quantity_proj = nn.Sequential(
-            nn.Linear(1, config['d_model']),
-            nn.ReLU(),
-            nn.LayerNorm(config['d_model'])
-        )
-        self.dropout = nn.Dropout(config['dropout'])
-
-    def forward(self, tokens): # this one works.
-        # Ensure shape: [batch_size, seq_len]
-        for k in ['type', 'location', 'source_location', 'material', 'time', 'start_time', 'end_time', 'parent', 'child']:
-            if tokens[k].dim() == 1:
-                tokens[k] = tokens[k].unsqueeze(0)
-            elif tokens[k].dim() == 3:
-                tokens[k] = tokens[k].squeeze(1)
-
-        if tokens['quantity'].dim() == 1:
-            tokens['quantity'] = tokens['quantity'].unsqueeze(0)
-        elif tokens['quantity'].dim() == 3:
-            tokens['quantity'] = tokens['quantity'].squeeze(1)
-
-        e_type = self.type_emb(tokens['type'])
-        
-        e_loc = self.loc_emb(tokens['location'])
-        e_source_loc = self.loc_emb(tokens['source_location'])
-
-        e_time = self.time_emb(tokens['time'])
-
-        e_start_time = self.time_emb(tokens['start_time'])
-        e_end_time = self.time_emb(tokens['end_time'])
-        e_request_time = self.time_emb(tokens['request_time'])
-        e_commit_time = self.time_emb(tokens['commit_time'])
-
-        e_demand = self.demand_emb(tokens['demand'])
-        e_mat = self.mat_emb(tokens['material'])
-
-        
-        e_parent = self.mat_emb(tokens['parent'])
-        e_child = self.mat_emb(tokens['child'])
-
-        #e_parent = self.mat_emb(tokens['material'])
-        #e_child = self.mat_emb(tokens['material'])
-
-        e_method = self.method_emb(tokens['method'])
-        e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
-
-        # Check which tokens are BOMs
-        is_bom = (tokens['type'] == get_token_type('bom')).unsqueeze(-1).float()
-
-        e_combined = (
-            e_type + e_loc + e_source_loc + e_time + e_demand + e_mat +
-            e_method + e_qty + e_start_time + e_end_time +
-            e_request_time + e_commit_time
-        )
-
-        e_bom = e_parent + e_child
-
-        embeddings = (1 - is_bom) * e_combined + is_bom * e_bom
-
-        return self.dropout(embeddings)
-
 
 # --- Transformer Model ---
+DEBUG_FORWARD = True
 class SCMTransformerModel(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -263,36 +204,39 @@ class SCMTransformerModel(nn.Module):
         return logits + allowed_mask
 
     def apply_field_constraints(self, logits_dict, prev_tokens):
+        MASK_VAL = -1e9  # safer alternative to float('-inf')
+
         batch_size = prev_tokens['type'].size(0)
 
         for b in range(batch_size):
             last = {k: prev_tokens[k][b][-1].item() for k in prev_tokens}
 
             if last['type'] == get_token_type('demand'): #1:  demand
-                logits_dict['end_time'][b, :, last['commit_time'] + 1:] = float('-inf')
+                logits_dict['end_time'][b, :, last['commit_time'] + 1:] = MASK_VAL # float('-inf')
 
             if last['type'] == get_token_type('move'):  # move
-                logits_dict['location'][b, :, :] = float('-inf')
+                logits_dict['location'][b, :, :] = MASK_VAL # float('-inf')
                 logits_dict['location'][b, :, last['source_location']] = 0.0
             else:
-                logits_dict['location'][b, :, :] = float('-inf')
+                logits_dict['location'][b, :, :] = MASK_VAL # float('-inf')
                 logits_dict['location'][b, :, last['location']] = 0.0
 
-            logits_dict['demand'][b, :, :] = float('-inf')
+            logits_dict['demand'][b, :, :] = MASK_VAL # float('-inf')
             logits_dict['demand'][b, :, last['demand']] = 0.0
 
-            logits_dict['material'][b, :, :] = float('-inf')
+            logits_dict['material'][b, :, :] = MASK_VAL # float('-inf')
             logits_dict['material'][b, :, last['material']] = 0.0
 
-            logits_dict['end_time'][b, :, last['start_time'] + 1:] = float('-inf')
+            logits_dict['end_time'][b, :, last['start_time'] + 1:] = MASK_VAL # float('-inf')
 
             # Enforce quantity equality
             if 'quantity' in logits_dict:
-                logits_dict['quantity'][b, :] = float('-inf')
+                logits_dict['quantity'][b, :] = MASK_VAL # float('-inf')
                 logits_dict['quantity'][b, -1] = last['quantity']
 
         return logits_dict
-        
+
+    
     def forward(self, src_tokens, tgt_tokens, bom_edges=None):
         assert (src_tokens['demand'] < config['num_demands']).all(), "demand_id out of range"
         assert (src_tokens['material'] < config['num_materials']).all(), "material_id out of range"
@@ -332,35 +276,51 @@ class SCMTransformerModel(nn.Module):
         if tgt_tokens is not None:
             output_logits = self.apply_field_constraints(output_logits, tgt_tokens)
 
-        return output_logits
+        def decode_val(key, out, use_argmax=True):
+            val = out[key][0, -1]
+            if key == 'type':
+                val = val[..., :4]
+            if use_argmax:
+                return val.argmax(-1).item()
+            if val.numel() == 1:
+                return val.item()
+            return val.tolist()
     
-    def _forward(self, src_tokens, tgt_tokens): # this one works
-        assert (src_tokens['demand'] < config['num_demands']).all(), "demand_id out of range"
-        assert (src_tokens['material'] < config['num_materials']).all(), "material_id out of range"
+        if DEBUG_FORWARD and self.training:
+            print("\n🔎 Debug Forward Pass:")
+            #print("src_tokens['type']:", src_tokens['type'][0].tolist())
+            print("tgt_tokens['type']:", tgt_tokens['type'][0].tolist())
 
-        src = self.embed(src_tokens)
-        tgt = self.embed(tgt_tokens)
+            if isinstance(output_logits, dict):
+                decoded = {}
+                for key in output_logits:
+                    pred = decode_val(key, output_logits)
+                    decoded[key] = pred
 
-        memory = self.encoder(src)
-        decoded = self.decoder(tgt, memory)
+                print("🔢 Predicted next token:")
+                for k, v in decoded.items():
+                    print(f"  {k}: {v}")
 
-        return {
-            'demand': self.demand_out(decoded),
-            'type': self.type_out(decoded),
-            'material': self.material_out(decoded),
-            'location': self.location_out(decoded),
-            'start_time': self.time_out(decoded),
-            'end_time': self.time_out(decoded),
-            'request_time': self.time_out(decoded),
-            'commit_time': self.time_out(decoded),            
-            'quantity': self.quantity_out(decoded).squeeze(-1),
-            'method': self.method_out(decoded),
+            if tgt_tokens['type'].size(1) >= 2:  # Ensure we have a "previous" token
+                prev_idx = -2
+                prev = {k: tgt_tokens[k][0, prev_idx].item() for k in ['type', 'end_time', 'location', 'source_location', 'demand', 'material', 'quantity']}
+                print("🔁 Previous token:")
+                for k, v in prev.items():
+                    print(f"  {k}: {v}")
 
-            'parent': self.material_out(decoded),
-            'child': self.material_out(decoded)
-            #'ref_id': self.ref_id_out(decoded),
-            #'depends_on': self.depends_on_out(decoded)
-        }
+                print("\n🔍 Constraint Check:")
+                if prev['type'] == get_token_type('demand'):
+                    print("✔ Constraint (end_time <= commit_time)? Skipped for now")
+                if prev['type'] == get_token_type('move'):
+                    print(f"✔ Constraint: location == source_location? {decoded['location'] == prev['source_location']}")
+                else:
+                    print(f"✔ Constraint: location == location? {decoded['location'] == prev['location']}")
+                print(f"✔ Constraint: demand match? {decoded['demand'] == prev['demand']}")
+                print(f"✔ Constraint: material match? {decoded['material'] == prev['material']}")
+                print(f"✔ Constraint: quantity match? {decoded['quantity'] == prev['quantity']}")
+                print(f"✔ Constraint: start_time >= end_time? {decoded['start_time'] >= prev['end_time']}")
+
+        return output_logits
 
 
 # --- Candidate Token Generator ---
@@ -495,39 +455,6 @@ class SCMDataset(Dataset):
         }
         return demand_dicts, tokens
 
-    def _load_plan(self, path):
-        df = pd.read_csv(path)
-        num_bins = config['num_time_steps']
-
-        # Clip time values to avoid IndexError
-        df["start_time"] = df["start_time"].clip(lower=0, upper=num_bins - 1).astype(int)
-        df["end_time"] = df["end_time"].clip(lower=0, upper=num_bins - 1).astype(int)
-
-        tokens = {
-            #"type": torch.zeros((1, len(df)), dtype=torch.long),
-            "type": torch.zeros((len(df)), dtype=torch.long),
-
-            "location": torch.tensor(df["location_id"].values, dtype=torch.long), #.unsqueeze(0),
-            "material": torch.tensor(df["material_id"].values, dtype=torch.long), #.unsqueeze(0),
-            "time": torch.tensor(df["start_time"].values, dtype=torch.long), #.unsqueeze(0),
-
-            #"method_id": torch.zeros((1, len(df)), dtype=torch.long),
-            #"method_id": torch.zeros((len(df)), dtype=torch.long),
-
-            "quantity": torch.tensor(df["quantity"].values, dtype=torch.float), #.unsqueeze(0),
-
-            #"token_type_id": torch.full((1, len(df)), 2, dtype=torch.long),
-            "token_type_id": torch.zeros((len(df)), dtype=torch.long),
-        }
-        labels = {
-            "material": tokens["material"].clone(),
-            "location": tokens["location"].clone(),
-            "start_time": torch.tensor(df["start_time"].values, dtype=torch.long), #.unsqueeze(0),
-            "end_time": torch.tensor(df["end_time"].values, dtype=torch.long), #.unsqueeze(0),
-            "quantity": tokens["quantity"].clone(),
-        }
-        return tokens, labels
-    
     def load_combined(self, path):
         df = pd.read_csv(path)
         num_bins = config['num_time_steps']
@@ -629,17 +556,6 @@ def train_stepwise(model=None, depth=None):
                 last_pred = {k: v[:, -1] for k, v in pred.items()}
 
                 loss = (
-                    1.0 * F.cross_entropy(last_pred['demand'], labels['demand'][:, t]) +
-                    1.0 * F.cross_entropy(last_pred['material'], labels['material'][:, t]) +
-                    1.0 * F.cross_entropy(last_pred['location'], labels['location'][:, t]) +
-                    1.0 * F.cross_entropy(last_pred['start_time'], labels['start_time'][:, t]) +
-                    1.0 * F.cross_entropy(last_pred['end_time'], labels['end_time'][:, t]) +
-                    1.0 * F.cross_entropy(last_pred['request_time'], labels['request_time'][:, t]) +
-                    1.0 * F.cross_entropy(last_pred['commit_time'], labels['commit_time'][:, t]) +
-                    1.0 * F.mse_loss(last_pred['quantity'], labels['quantity'][:, t])
-                )
-
-                loss = (
                     loss_weights['demand'] * F.cross_entropy(last_pred['demand'], labels['demand'][:, t]) +
                     loss_weights['material'] * F.cross_entropy(last_pred['material'], labels['material'][:, t]) +
                     loss_weights['location'] * F.cross_entropy(last_pred['location'], labels['location'][:, t]) +
@@ -664,6 +580,9 @@ def train_stepwise(model=None, depth=None):
         scheduler.step(total_loss)
         if scheduler.num_bad_epochs == 0:
             print(f"📉 Learning rate reduced to {optimizer.param_groups[0]['lr']:.6f}")
+        # Print updated learning rate
+        for param_group in optimizer.param_groups:
+            print(f"📉 Learning rate: {param_group['lr']:.6f}")
 
         print(f"Epoch {epoch+1}/{config['epochs']} - Stepwise Loss: {total_loss:.4f}")
 
@@ -707,75 +626,9 @@ def train_stepwise(model=None, depth=None):
     torch.save(model.state_dict(), config['checkpoint_path'])
     print(f"✅ Model saved to {config['checkpoint_path']}")
   
-# --- Collate function (for batch padding if needed) ---
-def collate_batch(batch):
-    from torch.nn.utils.rnn import pad_sequence
-
-    def stack_dicts(dicts, pad=False):
-        from torch.nn.utils.rnn import pad_sequence
-
-        result = {}
-        keys = dicts[0].keys()
-        for k in keys:
-            items = [d[k] for d in dicts]
-            if pad:
-                # Determine correct dtype padding value
-                dtype = items[0].dtype
-                padding_value = 0.0 if dtype == torch.float else 0
-                result[k] = pad_sequence(items, batch_first=True, padding_value=padding_value)
-            else:
-                result[k] = torch.stack(items)
-        return result
-
-    def _stack_dicts(dicts, pad=False):
-        result = {}
-        keys = dicts[0].keys()
-        for k in keys:
-            items = [d[k] for d in dicts]
-            if pad:
-                if items[0].dim() == 1:
-                    result[k] = pad_sequence(items, batch_first=True)
-                else:
-                    result[k] = pad_sequence(items, batch_first=True, padding_value=0.0)
-            else:
-                result[k] = torch.stack(items)
-        return result
-
-    src_batch, tgt_batch, label_batch = zip(*batch)
-    #return stack_dicts(src_batch), stack_dicts(tgt_batch, pad=True), stack_dicts(label_batch, pad=True)
-    return stack_dicts(src_batch, pad=True), stack_dicts(tgt_batch, pad=True), stack_dicts(label_batch, pad=True)
-
 
 # --- Predict Plan ---
-def is_demand_balanced(demands, plan, tolerance=1e-2):
-    from collections import defaultdict
 
-    fulfilled = defaultdict(float)
-    for step in plan:
-        key = (step["material_id"], step["location_id"])
-        fulfilled[key] += step["quantity"]
-
-    for d in demands:
-        key = (d["material_id"], d["location_id"])
-        if fulfilled[key] + tolerance < d["quantity"]:
-            return False
-
-    return True
-
-bom_map = defaultdict(set)
-def load_bom(path="data/bom.csv") -> dict[int, set[int]]:
-    global bom_map
-    if bom_map is None or len(bom_map) == 0 :
-        bom = defaultdict(set)
-        with open(path, newline="") as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                parent = int(row["parent"])
-                child = int(row["child"])
-                bom[parent].add(child)
-        #return dict(bom)
-        bom_map = bom
-    return bom_map
 
 def load_bom_graph(path="data/bom.csv"):
     df = pd.read_csv(path)
@@ -867,7 +720,7 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
             tgt_copy[key] = torch.cat([tgt_copy[key], val_tensor], dim=1)
         return tgt_copy
 
-    def decode_val(key, out, use_argmax=True):
+    def _decode_val(key, out, use_argmax=True):
         val = out[key][0, -1]
         if key == 'type':
             val = val[..., :4]
@@ -875,6 +728,16 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
             return val.argmax(-1).item()
         return val.item() if val.numel() == 1 else val.tolist()
 
+    def decode_val(key, out, use_argmax=True):
+        val = out[key][0, -1]
+        if key == 'type':
+            val = val[..., :4]
+        if use_argmax:
+            return val.argmax(-1).item()
+        if val.numel() == 1:
+            return val.item()
+        return val.tolist()
+    
     def violates_constraints(plan, work_order):
         if inventory:
             inv_key = (work_order['material_id'], work_order['location_id'])
@@ -992,7 +855,10 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
         if not new_beams:
             break
         beams = sorted(new_beams, key=lambda x: -x[0])[:beam_width]
-
+    
+    if not beams:
+        return []
+    
     best_score, _, best_plan, _ = beams[0]
     return best_plan
 

@@ -11,6 +11,8 @@ import os
 import pandas as pd
 from pathlib import Path
 import networkx as nx
+import csv
+from collections import defaultdict
 
 # --- Config ---
 token_types = [
@@ -41,13 +43,75 @@ config = {
     'dropout': 0.1,
     'batch_size': 8,
     'lr': 1e-4,
-    'epochs': 30,
+    'epochs': 10,
     'checkpoint_path': 'scm_transformer.pt',
     "max_train_samples": 1000
 }
 
 # --- Embedding Module (Updated) ---
 class SCMEmbedding(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        d_model = config['d_model']
+        self.type_emb = nn.Embedding(config['num_token_types'], d_model)
+        self.loc_emb = nn.Embedding(config['num_locations'], d_model)
+        self.time_emb = nn.Embedding(config['num_time_steps'], d_model)
+        self.demand_emb = nn.Embedding(config['num_demands'], d_model)
+        self.mat_emb = nn.Embedding(config['num_materials'], d_model)
+        self.method_emb = nn.Embedding(config['num_methods'], d_model)
+
+        self.quantity_proj = nn.Sequential(
+            nn.Linear(1, d_model),
+            nn.ReLU(),
+            nn.LayerNorm(d_model)
+        )
+
+        self.dropout = nn.Dropout(config['dropout'])
+
+    def forward(self, tokens):
+        # Helper: ensure tokens are (B, T)
+        def ensure_2d(x):
+            if x.dim() == 1:
+                return x.unsqueeze(0)
+            elif x.dim() == 3:
+                return x.squeeze(1)
+            return x
+
+        for k in tokens:
+            tokens[k] = ensure_2d(tokens[k])
+
+        # Standard token embeddings
+        e_type = self.type_emb(tokens['type'])
+        e_loc = self.loc_emb(tokens['location'])
+        e_src_loc = self.loc_emb(tokens['source_location'])
+        e_time = self.time_emb(tokens['time'])
+        e_start = self.time_emb(tokens['start_time'])
+        e_end = self.time_emb(tokens['end_time'])
+        e_req = self.time_emb(tokens['request_time'])
+        e_commit = self.time_emb(tokens['commit_time'])
+
+        e_demand = self.demand_emb(tokens['demand'])
+        e_mat = self.mat_emb(tokens['material'])
+        e_method = self.method_emb(tokens['method'])
+        e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
+
+        # BOM-specific
+        e_parent = self.mat_emb(tokens['parent'])
+        e_child = self.mat_emb(tokens['child'])
+
+        # Mask: 1 if type is 'bom', 0 otherwise
+        is_bom = (tokens['type'] == get_token_type('bom')).unsqueeze(-1).float()
+
+        e_combined = (
+            e_type + e_loc + e_src_loc + e_time + e_start + e_end +
+            e_req + e_commit + e_demand + e_mat + e_method + e_qty
+        )
+        e_bom = e_parent + e_child
+
+        embeddings = (1 - is_bom) * e_combined + is_bom * e_bom
+        return self.dropout(embeddings)
+
+class _SCMEmbedding(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.type_emb = nn.Embedding(config['num_token_types'], config['d_model'])
@@ -69,38 +133,9 @@ class SCMEmbedding(nn.Module):
         )
         self.dropout = nn.Dropout(config['dropout'])
 
-    def _forward(self, input_tokens: Dict[str, torch.Tensor], target_tokens: Optional[Dict[str, torch.Tensor]] = None):
-        # --- 1. Encode input tokens ---
-        #input_embeddings = self.encode_token(input_tokens)  # (B, T_enc, D)
-        input_embeddings = encode_tokens(input_tokens)  # (B, T_enc, D)
-        enc_out = self.encoder(input_embeddings)            # (B, T_enc, D)
-
-        # --- 2. Prepare target embeddings ---
-        if target_tokens is not None:
-            decoder_input = self.encode_token(target_tokens)[:, :-1]  # (B, T_dec-1, D), teacher forcing
-        else:
-            # Start with a [BOS] token per field (zeros) if not given
-            B, D = input_embeddings.shape[0], self.embedding_dim
-            T_dec = 1  # we will autoregressively grow this
-            decoder_input = torch.zeros(B, T_dec, D, device=enc_out.device)
-
-        # --- 3. Decode ---
-        dec_out = self.decoder(decoder_input, enc_out)  # (B, T_dec, D)
-
-        # --- 4. Project decoder output to each token field ---
-        logits = {}
-        for name, spec in self.token_specs.items():
-            if spec["shape"] == ():  # scalar token, e.g., material_id
-                logits[name] = self.output_heads[name](dec_out)  # (B, T_dec, vocab_size)
-            else:  # tensor token, e.g., quantity (float), with shape=(1,) or more
-                # Use MLP projection to the correct shape
-                logits[name] = self.output_heads[name](dec_out).reshape(dec_out.shape[0], dec_out.shape[1], *spec["shape"])
-
-        return logits
-
-    def forward(self, tokens):
+    def forward(self, tokens): # this one works.
         # Ensure shape: [batch_size, seq_len]
-        for k in ['type', 'location', 'material', 'time', 'start_time', 'end_time']:
+        for k in ['type', 'location', 'source_location', 'material', 'time', 'start_time', 'end_time', 'parent', 'child']:
             if tokens[k].dim() == 1:
                 tokens[k] = tokens[k].unsqueeze(0)
             elif tokens[k].dim() == 3:
@@ -112,7 +147,10 @@ class SCMEmbedding(nn.Module):
             tokens['quantity'] = tokens['quantity'].squeeze(1)
 
         e_type = self.type_emb(tokens['type'])
+        
         e_loc = self.loc_emb(tokens['location'])
+        e_source_loc = self.loc_emb(tokens['source_location'])
+
         e_time = self.time_emb(tokens['time'])
 
         e_start_time = self.time_emb(tokens['start_time'])
@@ -124,11 +162,11 @@ class SCMEmbedding(nn.Module):
         e_mat = self.mat_emb(tokens['material'])
 
         
-        #e_parent = self.mat_emb(tokens['parent'])
-        #e_child = self.mat_emb(tokens['child'])
+        e_parent = self.mat_emb(tokens['parent'])
+        e_child = self.mat_emb(tokens['child'])
 
-        e_parent = self.mat_emb(tokens['material'])
-        e_child = self.mat_emb(tokens['material'])
+        #e_parent = self.mat_emb(tokens['material'])
+        #e_child = self.mat_emb(tokens['material'])
 
         e_method = self.method_emb(tokens['method'])
         e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
@@ -137,7 +175,7 @@ class SCMEmbedding(nn.Module):
         is_bom = (tokens['type'] == get_token_type('bom')).unsqueeze(-1).float()
 
         e_combined = (
-            e_type + e_loc + e_time + e_demand + e_mat +
+            e_type + e_loc + e_source_loc + e_time + e_demand + e_mat +
             e_method + e_qty + e_start_time + e_end_time +
             e_request_time + e_commit_time
         )
@@ -148,41 +186,6 @@ class SCMEmbedding(nn.Module):
 
         return self.dropout(embeddings)
 
-    def _forward(self, tokens):
-        # Ensure shape: [batch_size, seq_len]
-        #for k in ['type', 'location', 'material', 'time', 'method_id', 'token_type_id']:
-        for k in ['type', 'location', 'material', 'time', 'start_time', 'end_time']:
-            if tokens[k].dim() == 1:
-                tokens[k] = tokens[k].unsqueeze(0)
-            elif tokens[k].dim() == 3:
-                tokens[k] = tokens[k].squeeze(1)
-
-        if tokens['quantity'].dim() == 1:
-            tokens['quantity'] = tokens['quantity'].unsqueeze(0)
-        elif tokens['quantity'].dim() == 3:
-            tokens['quantity'] = tokens['quantity'].squeeze(1)
-
-        e_type = self.type_emb(tokens['type'])
-        e_loc = self.loc_emb(tokens['location'])
-        e_time = self.time_emb(tokens['time'])
-
-        e_start_time = self.time_emb(tokens['start_time'])
-        e_end_time = self.time_emb(tokens['end_time'])
-        e_request_time = self.time_emb(tokens['request_time'])
-        e_commit_time = self.time_emb(tokens['commit_time'])
-
-        e_demand = self.demand_emb(tokens['demand'])
-        e_mat = self.mat_emb(tokens['material'])
-        e_parent = self.mat_emb(tokens['material'])
-        e_child = self.mat_emb(tokens['material'])
-
-        e_method = self.method_emb(tokens['method'])
-        e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
-        #e_toktype = self.token_type_emb(tokens['token_type_id'])
-
-        #return self.dropout(e_type + e_loc + e_time + e_mat + e_method + e_qty + e_toktype)
-        return self.dropout(e_type + e_loc + e_time + e_demand + e_mat + e_parent + e_child + e_method + e_qty + e_start_time + e_end_time + e_request_time + e_commit_time)
-    
 
 # --- Transformer Model ---
 class SCMTransformerModel(nn.Module):
@@ -212,16 +215,126 @@ class SCMTransformerModel(nn.Module):
         self.demand_out = nn.Linear(d_model, config['num_demands'])
         self.type_out = nn.Linear(d_model, config['num_token_types'])
         self.material_out = nn.Linear(d_model, config['num_materials'])
+        
         self.location_out = nn.Linear(d_model, config['num_locations'])
+        self.source_location_out = nn.Linear(d_model, config['num_locations'])
+
         self.time_out = nn.Linear(d_model, config['num_time_steps'])
-        #self.start_time_out = nn.Linear(d_model, config['num_time_steps'])
-        #self.end_time_out = nn.Linear(d_model, config['num_time_steps'])
+        self.start_time_out = nn.Linear(d_model, config['num_time_steps'])
+        self.end_time_out = nn.Linear(d_model, config['num_time_steps'])
+        self.request_time_out = nn.Linear(d_model, config['num_time_steps'])
+        self.commit_time_out = nn.Linear(d_model, config['num_time_steps'])
+
         self.quantity_out = nn.Linear(d_model, 1)
         self.method_out = nn.Linear(d_model, config['num_methods'])
         #self.ref_id_out = nn.Linear(d_model, 64)  # Assume 64 is max number of ref_ids
         #self.depends_on_out = nn.Linear(d_model, 64)  # Same assumption
 
-    def forward(self, src_tokens, tgt_tokens):
+    def apply_bom_mask(self, logits, src_tokens, tgt_tokens):
+        from collections import defaultdict
+
+        #child_map = defaultdict(set)
+        #for parent, child in bom_edges:
+        #    child_map[parent].add(child)
+        child_map = load_bom()
+        batch_size = logits.size(0)
+        allowed_mask = torch.full_like(logits, float('-inf'))
+
+        for b in range(batch_size):
+            allowed = set()
+            for i, token_type in enumerate(src_tokens['type'][b]):
+                if token_type == get_token_type('demand'):  # Only consider demand tokens
+                    allowed.add(src_tokens['material'][b][i].item())
+            if tgt_tokens is not None:
+                for i, token_type in enumerate(tgt_tokens['type'][b]):
+                    mat = tgt_tokens['material'][b][i].item()
+                    if token_type == get_token_type('make'):  # make
+                        allowed.update(child_map.get(mat, []))
+                    if token_type == get_token_type('purchase') or token_type == get_token_type('move') or token_type == get_token_type('demand'):
+                        allowed.add(mat)
+
+            if not allowed:
+                allowed = {0}  # fallback
+
+            for mat_id in allowed:
+                if mat_id < logits.shape[-1]:
+                    allowed_mask[b, :, mat_id] = 0.0
+
+        return logits + allowed_mask
+
+    def apply_field_constraints(self, logits_dict, prev_tokens):
+        batch_size = prev_tokens['type'].size(0)
+
+        for b in range(batch_size):
+            last = {k: prev_tokens[k][b][-1].item() for k in prev_tokens}
+
+            if last['type'] == get_token_type('demand'): #1:  demand
+                logits_dict['end_time'][b, :, last['commit_time'] + 1:] = float('-inf')
+
+            if last['type'] == get_token_type('move'):  # move
+                logits_dict['location'][b, :, :] = float('-inf')
+                logits_dict['location'][b, :, last['source_location']] = 0.0
+            else:
+                logits_dict['location'][b, :, :] = float('-inf')
+                logits_dict['location'][b, :, last['location']] = 0.0
+
+            logits_dict['demand'][b, :, :] = float('-inf')
+            logits_dict['demand'][b, :, last['demand']] = 0.0
+
+            logits_dict['material'][b, :, :] = float('-inf')
+            logits_dict['material'][b, :, last['material']] = 0.0
+
+            logits_dict['end_time'][b, :, last['start_time'] + 1:] = float('-inf')
+
+            # Enforce quantity equality
+            if 'quantity' in logits_dict:
+                logits_dict['quantity'][b, :] = float('-inf')
+                logits_dict['quantity'][b, -1] = last['quantity']
+
+        return logits_dict
+        
+    def forward(self, src_tokens, tgt_tokens, bom_edges=None):
+        assert (src_tokens['demand'] < config['num_demands']).all(), "demand_id out of range"
+        assert (src_tokens['material'] < config['num_materials']).all(), "material_id out of range"
+
+        src = self.embed(src_tokens)
+        tgt = self.embed(tgt_tokens)
+
+        memory = self.encoder(src)
+        decoded = self.decoder(tgt, memory)
+
+        material_logits = self.material_out(decoded)
+        #if bom_edges is not None:
+        material_logits = self.apply_bom_mask(material_logits, src_tokens, tgt_tokens)
+
+        quantity_pred = self.quantity_out(decoded).squeeze(-1)
+        quantity_pred = torch.clamp(quantity_pred, min=0.0, max=1e6)  # Clamp prediction for stability
+
+        output_logits = {
+            'demand': self.demand_out(decoded),
+            'type': self.type_out(decoded),
+            'material': material_logits,
+
+            'location': self.location_out(decoded),
+            'source_location': self.source_location_out(decoded),
+
+            'start_time': self.start_time_out(decoded),
+            'end_time': self.end_time_out(decoded),
+            'request_time': self.request_time_out(decoded),
+            'commit_time': self.commit_time_out(decoded),            
+            'quantity': quantity_pred, #self.quantity_out(decoded).squeeze(-1),
+            #'method': self.method_out(decoded),
+            #'parent': self.material_out(decoded),
+            #'child': self.material_out(decoded),
+            #'parent': material_logits,
+            #'child': material_logits
+        }
+        if tgt_tokens is not None:
+            output_logits = self.apply_field_constraints(output_logits, tgt_tokens)
+
+        return output_logits
+    
+    def _forward(self, src_tokens, tgt_tokens): # this one works
         assert (src_tokens['demand'] < config['num_demands']).all(), "demand_id out of range"
         assert (src_tokens['material'] < config['num_materials']).all(), "material_id out of range"
 
@@ -242,6 +355,9 @@ class SCMTransformerModel(nn.Module):
             'commit_time': self.time_out(decoded),            
             'quantity': self.quantity_out(decoded).squeeze(-1),
             'method': self.method_out(decoded),
+
+            'parent': self.material_out(decoded),
+            'child': self.material_out(decoded)
             #'ref_id': self.ref_id_out(decoded),
             #'depends_on': self.depends_on_out(decoded)
         }
@@ -258,7 +374,10 @@ def generate_candidate_tokens(input_dict):
         candidates.append({
             "demand": d["demand_id"],
             "type": 0,  # fixed type ID for demand
+            
             "location": d["location_id"],
+            "source_location": d["location_id"],
+
             "material": d["material_id"],
             #"time": d["time"],
 
@@ -268,7 +387,10 @@ def generate_candidate_tokens(input_dict):
             "commit_time": 0,
 
             "method": 0,
-            "quantity": d["quantity"]
+            "quantity": d["quantity"],
+
+            "parent": 0,
+            "child": 0,
         })
     return candidates
 
@@ -305,6 +427,8 @@ def encode_tokens(token_list, token_type_id=1):
     return {
         'type': to_tensor("type"),
         'location': to_tensor("location"),
+        'source_location': to_tensor("location"),
+
         'material': to_tensor("material"),
         'time': to_tensor("time"),
 
@@ -363,10 +487,15 @@ class SCMDataset(Dataset):
             "end_time": torch.zeros((len(df)), dtype=torch.long),
             "request_time": torch.tensor(df["request_time"].values, dtype=torch.long),
             "commit_time": torch.zeros((len(df)), dtype=torch.long),
+
+            "parent": torch.zeros((len(df)), dtype=torch.long),
+            "child": torch.zeros((len(df)), dtype=torch.long),
+
+            "source_location": torch.zeros((len(df)), dtype=torch.long),
         }
         return demand_dicts, tokens
 
-    def load_plan(self, path):
+    def _load_plan(self, path):
         df = pd.read_csv(path)
         num_bins = config['num_time_steps']
 
@@ -414,6 +543,8 @@ class SCMDataset(Dataset):
             "type": torch.tensor(df["type"].values, dtype=torch.long),
 
             "location": torch.tensor(df["location_id"].values, dtype=torch.long), #.unsqueeze(0),
+            "source_location": torch.tensor(df["source_location_id"].values, dtype=torch.long), #.unsqueeze(0),
+
             "material": torch.tensor(df["material_id"].values, dtype=torch.long), #.unsqueeze(0),
             "time": torch.tensor(df["start_time"].values, dtype=torch.long), #.unsqueeze(0),
 
@@ -427,6 +558,9 @@ class SCMDataset(Dataset):
             "method": torch.zeros((len(df)), dtype=torch.long),
 
             "quantity": torch.tensor(df["quantity"].values, dtype=torch.float), #.unsqueeze(0),
+
+            "parent": torch.zeros((len(df)), dtype=torch.long),
+            "child": torch.zeros((len(df)), dtype=torch.long),
 
             #"token_type_id": torch.full((1, len(df)), 2, dtype=torch.long),
             #"token_type_id": torch.zeros((len(df)), dtype=torch.long),
@@ -628,18 +762,20 @@ def is_demand_balanced(demands, plan, tolerance=1e-2):
 
     return True
 
+bom_map = defaultdict(set)
 def load_bom(path="data/bom.csv") -> dict[int, set[int]]:
-    import csv
-    from collections import defaultdict
-
-    bom = defaultdict(set)
-    with open(path, newline="") as csvfile:
-        reader = csv.DictReader(csvfile)
-        for row in reader:
-            parent = int(row["parent"])
-            child = int(row["child"])
-            bom[parent].add(child)
-    return dict(bom)
+    global bom_map
+    if bom_map is None or len(bom_map) == 0 :
+        bom = defaultdict(set)
+        with open(path, newline="") as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                parent = int(row["parent"])
+                child = int(row["child"])
+                bom[parent].add(child)
+        #return dict(bom)
+        bom_map = bom
+    return bom_map
 
 def load_bom_graph(path="data/bom.csv"):
     df = pd.read_csv(path)
@@ -713,6 +849,11 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
             'method': torch.tensor([[0]], dtype=torch.long),
             'quantity': torch.tensor([[0.0]], dtype=torch.float),
             'id': torch.tensor([[0]], dtype=torch.long),
+
+            'parent': torch.tensor([[0]], dtype=torch.long),
+            'child': torch.tensor([[0]], dtype=torch.long),
+
+            'source_location': torch.tensor([[0]], dtype=torch.long),
         }
 
     def expand_beam(tgt_tokens, new_val):
@@ -884,6 +1025,9 @@ def generate_static_tokens():
             'method': int(row['id']),
             'material': int(row['material_id']),
             'location': int(row['location_id']),
+            #'source_location': int(row['source_location_id']),
+            'source_location': int(row['source_location_id']) if pd.notna(row['source_location_id']) else 0
+
             #'method_type': int(row['method_type'])
         })
 

@@ -38,7 +38,7 @@ def create_work_order(demand_id, method, start_time, end_time, quantity):
         'type': method['type'],
         'material_id': method['material_id'],
         'location_id': method['location_id'],
-        'target_location_id': method.get('target_location_id', None),
+        'source_location_id': method.get('source_location_id', None),
         'route_id': method.get('route_id', None),
         'bom_id': method.get('bom_id', None),
         'start_time': start_time,
@@ -63,11 +63,16 @@ def solve_demand(d, methods, bom, now):
     child_wos = []
     commit_times = []
 
-    for c in bom.get(m_id, []):
+    child_materials = bom.get(m_id, []) # make
+    if method.type == get_token_type('move'): #move
+        child_materials.append(m_id)
+
+    for c in child_materials:
+    #for c in bom.get(m_id, []):
         c_demand = {
             'demand_id': demand_id,
             'material_id': c,
-            'location_id': method['location_id'],
+            'location_id': method['location_id'] if method.type == get_token_type('make') else method['source_location_id'],
             'request_time': max([req_time - method['lead_time'], now]), # req_time 
             'quantity': quantity
         }

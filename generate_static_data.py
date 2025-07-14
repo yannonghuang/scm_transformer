@@ -74,22 +74,22 @@ if not static_flag:
                 methods.append({
                     'id': method_id, 'type': get_token_type('purchase'), 'material_id': mat,
                     'lead_time': random.randint(1, 5), 'location_id': loc,
-                    'target_location_id': None, 'route_id': None, 'bom_id': None
+                    'source_location_id': None, 'route_id': None, 'bom_id': None
                 })
                 method_id += 1
             if mat not in leaves: # and random.random() < MAKE_PROB:
                 methods.append({
                     'id': method_id, 'type': get_token_type('make'), 'material_id': mat,
                     'lead_time': random.randint(1, 5), 'location_id': loc,
-                    'target_location_id': None, 'route_id': None, 'bom_id': None
+                    'source_location_id': None, 'route_id': None, 'bom_id': None
                 })
                 method_id += 1
             if random.random() < MOVE_PROB:
-                tgt_loc = random.choice([l for l in range(NUM_LOCATIONS) if l != loc])
+                src_loc = random.choice([l for l in range(NUM_LOCATIONS) if l != loc])
                 methods.append({
                     'id': method_id, 'type': get_token_type('move'), 'material_id': mat,
                     'lead_time': random.randint(1, 5), 'location_id': loc,
-                    'target_location_id': tgt_loc, 'route_id': None, 'bom_id': None
+                    'source_location_id': src_loc, 'route_id': None, 'bom_id': None
                 })
                 method_id += 1
     methods_df = pd.DataFrame(methods)

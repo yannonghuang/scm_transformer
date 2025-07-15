@@ -13,6 +13,33 @@ from pathlib import Path
 import networkx as nx
 import csv
 from collections import defaultdict
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Ensure the logs/ directory exists
+os.makedirs("logs", exist_ok=True)
+
+# Create a rotating file handler: 5 MB per file, keep up to 3 files
+rotating_handler = RotatingFileHandler(
+    "logs/training.log", maxBytes=50 * 1024 * 1024, backupCount=5
+)
+
+# Console handler to also log to stdout
+console_handler = logging.StreamHandler()
+
+# Set formatter for both handlers
+formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+rotating_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Get the root logger and set the level
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)  # Set global log level here
+
+# Add both handlers to the logger
+logger.addHandler(rotating_handler)
+logger.addHandler(console_handler)
+
 
 # --- Config ---
 token_types = [
@@ -209,6 +236,42 @@ class SCMTransformerModel(nn.Module):
         batch_size = prev_tokens['type'].size(0)
 
         for b in range(batch_size):
+            seq_size = prev_tokens['type'][b].size(0)
+            for seq in range(seq_size):
+
+                last = {k: prev_tokens[k][b][seq].item() for k in prev_tokens}
+
+                if last['type'] == get_token_type('demand'): #1:  demand
+                    logits_dict['end_time'][b, seq, last['commit_time'] + 1:] = MASK_VAL # float('-inf')
+
+                if last['type'] == get_token_type('move'):  # move
+                    logits_dict['location'][b, seq, :] = MASK_VAL # float('-inf')
+                    logits_dict['location'][b, seq, last['source_location']] = 0.0
+                else:
+                    logits_dict['location'][b, seq, :] = MASK_VAL # float('-inf')
+                    logits_dict['location'][b, seq, last['location']] = 0.0
+
+                logits_dict['demand'][b, seq, :] = MASK_VAL # float('-inf')
+                logits_dict['demand'][b, seq, last['demand']] = 0.0
+
+                logits_dict['material'][b, seq, :] = MASK_VAL # float('-inf')
+                logits_dict['material'][b, seq, last['material']] = 0.0
+
+                logits_dict['end_time'][b, seq, last['start_time'] + 1:] = MASK_VAL # float('-inf')
+
+                # Enforce quantity equality
+                if 'quantity' in logits_dict:
+                    logits_dict['quantity'][b, seq] = MASK_VAL # float('-inf')
+                    logits_dict['quantity'][b, seq] = last['quantity']
+
+        return logits_dict
+    
+    def _apply_field_constraints(self, logits_dict, prev_tokens):
+        MASK_VAL = -1e9  # safer alternative to float('-inf')
+
+        batch_size = prev_tokens['type'].size(0)
+
+        for b in range(batch_size):
             last = {k: prev_tokens[k][b][-1].item() for k in prev_tokens}
 
             if last['type'] == get_token_type('demand'): #1:  demand
@@ -287,9 +350,9 @@ class SCMTransformerModel(nn.Module):
             return val.tolist()
     
         if DEBUG_FORWARD and self.training:
-            print("\n🔎 Debug Forward Pass:")
+            logger.info("\n🔎 Debug Forward Pass:")
             #print("src_tokens['type']:", src_tokens['type'][0].tolist())
-            print("tgt_tokens['type']:", tgt_tokens['type'][0].tolist())
+            logger.info(f"tgt_tokens['type']: {tgt_tokens['type'][0].tolist()}")
 
             if isinstance(output_logits, dict):
                 decoded = {}
@@ -297,28 +360,28 @@ class SCMTransformerModel(nn.Module):
                     pred = decode_val(key, output_logits)
                     decoded[key] = pred
 
-                print("🔢 Predicted next token:")
+                logger.info("🔢 Predicted next token:")
                 for k, v in decoded.items():
-                    print(f"  {k}: {v}")
+                    logger.info(f"  {k}: {v}")
 
             if tgt_tokens['type'].size(1) >= 2:  # Ensure we have a "previous" token
                 prev_idx = -2
                 prev = {k: tgt_tokens[k][0, prev_idx].item() for k in ['type', 'end_time', 'location', 'source_location', 'demand', 'material', 'quantity']}
-                print("🔁 Previous token:")
+                logger.debug("🔁 Previous token:")
                 for k, v in prev.items():
-                    print(f"  {k}: {v}")
+                    logger.debug(f"  {k}: {v}")
 
-                print("\n🔍 Constraint Check:")
+                logger.debug("\n🔍 Constraint Check:")
                 if prev['type'] == get_token_type('demand'):
-                    print("✔ Constraint (end_time <= commit_time)? Skipped for now")
+                    logger.debug("✔ Constraint (end_time <= commit_time)? Skipped for now")
                 if prev['type'] == get_token_type('move'):
-                    print(f"✔ Constraint: location == source_location? {decoded['location'] == prev['source_location']}")
+                    logger.debug(f"✔ Constraint: location == source_location? {decoded['location'] == prev['source_location']}")
                 else:
-                    print(f"✔ Constraint: location == location? {decoded['location'] == prev['location']}")
-                print(f"✔ Constraint: demand match? {decoded['demand'] == prev['demand']}")
-                print(f"✔ Constraint: material match? {decoded['material'] == prev['material']}")
-                print(f"✔ Constraint: quantity match? {decoded['quantity'] == prev['quantity']}")
-                print(f"✔ Constraint: start_time >= end_time? {decoded['start_time'] >= prev['end_time']}")
+                    logger.debug(f"✔ Constraint: location == location? {decoded['location'] == prev['location']}")
+                logger.debug(f"✔ Constraint: demand match? {decoded['demand'] == prev['demand']}")
+                logger.debug(f"✔ Constraint: material match? {decoded['material'] == prev['material']}")
+                logger.debug(f"✔ Constraint: quantity match? {decoded['quantity'] == prev['quantity']}")
+                logger.debug(f"✔ Constraint: start_time >= end_time? {decoded['start_time'] >= prev['end_time']}")
 
         return output_logits
 
@@ -410,7 +473,7 @@ def train():
     model = SCMTransformerModel(config).to(device)
     max_depth = get_max_depth(load_bom_graph())
     for depth in range(1, max_depth + 1):
-        print(f"\n📚 Training on samples with BOM depth <= {depth}")
+        logger.info(f"\n📚 Training on samples with BOM depth <= {depth}")
         train_stepwise(model, depth - 1)
 
 class SCMDataset(Dataset):
@@ -512,9 +575,9 @@ def update_config_from_static_data(config, logs_root="data/logs"):
 
     config['num_materials'] = max_material + 1
     config['num_locations'] = max_location + 1
-    print(f"🔧 Config updated: {config['num_materials']} materials, {config['num_locations']} locations")
+    logger.info(f"🔧 Config updated: {config['num_materials']} materials, {config['num_locations']} locations")
 
-loss_weights = {
+loss_weights = {'type': 1.0, 
     'demand': 1.0, 'material': 1.0, 'location': 1.0,
     'start_time': 1.0, 'end_time': 1.0, 'request_time': 1.0,
     'commit_time': 1.0, 'quantity': 1.0
@@ -528,7 +591,7 @@ def train_stepwise(model=None, depth=None):
 
     sample_path = os.path.join('data', 'logs', f'depth_{depth}')
     if not os.path.exists(sample_path):
-        print(f'sample data {sample_path} does not exist, exit ...')
+        logger.info(f'sample data {sample_path} does not exist, exit ...')
         return
     #os.makedirs(OUTDIR, exist_ok=True)
 
@@ -548,14 +611,20 @@ def train_stepwise(model=None, depth=None):
             labels = {k: v.to(device) for k, v in labels.items()}
             tgt_len = tgt['material'].shape[1]
 
-            tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
+            #tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
+            # Start with the actual first token from the ground truth
+            tgt_tokens = {
+                key: tgt[key][:, :1].clone()
+                for key in tgt
+            }
 
             loss_accum = 0.0
-            for t in range(tgt_len):
+            for t in range(1, tgt_len):
                 pred = model(src, tgt_tokens)
                 last_pred = {k: v[:, -1] for k, v in pred.items()}
 
                 loss = (
+                    loss_weights['type'] * F.cross_entropy(last_pred['type'], labels['type'][:, t]) +
                     loss_weights['demand'] * F.cross_entropy(last_pred['demand'], labels['demand'][:, t]) +
                     loss_weights['material'] * F.cross_entropy(last_pred['material'], labels['material'][:, t]) +
                     loss_weights['location'] * F.cross_entropy(last_pred['location'], labels['location'][:, t]) +
@@ -579,12 +648,12 @@ def train_stepwise(model=None, depth=None):
 
         scheduler.step(total_loss)
         if scheduler.num_bad_epochs == 0:
-            print(f"📉 Learning rate reduced to {optimizer.param_groups[0]['lr']:.6f}")
+            logger.info(f"📉 Learning rate reduced to {optimizer.param_groups[0]['lr']:.6f}")
         # Print updated learning rate
         for param_group in optimizer.param_groups:
-            print(f"📉 Learning rate: {param_group['lr']:.6f}")
+            logger.info(f"📉 Learning rate: {param_group['lr']:.6f}")
 
-        print(f"Epoch {epoch+1}/{config['epochs']} - Stepwise Loss: {total_loss:.4f}")
+        logger.info(f"Epoch {epoch+1}/{config['epochs']} - Stepwise Loss: {total_loss:.4f}")
 
         # Validation loss
         model.eval()
@@ -621,10 +690,10 @@ def train_stepwise(model=None, depth=None):
 
                 val_loss += loss_accum.item()
         model.train()
-        print(f"🔍 Validation Loss: {val_loss:.4f}")
+        logger.info(f"🔍 Validation Loss: {val_loss:.4f}")
 
     torch.save(model.state_dict(), config['checkpoint_path'])
-    print(f"✅ Model saved to {config['checkpoint_path']}")
+    logger.info(f"✅ Model saved to {config['checkpoint_path']}")
   
 
 # --- Predict Plan ---
@@ -935,7 +1004,7 @@ def generate_encoder_input(input_dict):
 
 # Patch --- Update predict_plan to use generate_encoder_input()
 def predict_plan(model, input_example, threshold=0.5):
-    print("📦 Input to generate_candidate_tokens:", input_example["input"])
+    logger.info("📦 Input to generate_candidate_tokens:", input_example["input"])
     src_tokens = generate_encoder_input(input_example["input"])
 
     for k in src_tokens:
@@ -970,11 +1039,11 @@ def print_plan_vs_demand(predicted, ground_truth):
     gt_summary = summarize_by_key(ground_truth)
     all_keys = set(pred_summary) | set(gt_summary)
 
-    print("\nPlan vs Demand Comparison:")
+    logger.info("\nPlan vs Demand Comparison:")
     for k in sorted(all_keys):
         p = pred_summary.get(k, 0)
         g = gt_summary.get(k, 0)
-        print(f"  {k}: predicted={p:.2f}, ground_truth={g:.2f}, diff={abs(p-g):.2f}")
+        logger.info(f"  {k}: predicted={p:.2f}, ground_truth={g:.2f}, diff={abs(p-g):.2f}")
 
 
 # --- Evaluate Plan ---
@@ -990,9 +1059,9 @@ def evaluate_plan(predicted: List[Dict], ground_truth: List[Dict]) -> None:
     for key in keys:
         diff = abs(pred_dict.get(key, 0) - gt_dict.get(key, 0))
         total_diff += diff
-        print(f"Diff at {key}: {diff:.2f}")
+        logger.info(f"Diff at {key}: {diff:.2f}")
 
-    print(f"\nTotal quantity diff: {total_diff:.2f}")
+    logger.info(f"\nTotal quantity diff: {total_diff:.2f}")
 
 
 # --- CLI Entrypoint ---
@@ -1030,11 +1099,11 @@ def main():
         ]
 
         plan = predict_plan(model, input_example)
-        print("\nPredicted Plan:")
+        logger.info("\nPredicted Plan:")
         for step in plan:
-            print(step)
+            logger.info(step)
 
-        print("\nEvaluation vs APS:")
+        logger.info("\nEvaluation vs APS:")
         evaluate_plan(plan, aps_example)
 
         print_plan_vs_demand(plan, aps_example)

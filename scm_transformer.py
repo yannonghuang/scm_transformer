@@ -353,11 +353,15 @@ class SCMTransformerModel(nn.Module):
             logger.info("\n🔎 Debug Forward Pass:")
             #print("src_tokens['type']:", src_tokens['type'][0].tolist())
             logger.info(f"tgt_tokens['type']: {tgt_tokens['type'][0].tolist()}")
+            logger.info(f"Output logits['quantity']: {output_logits['quantity'][0, -1].detach().cpu().numpy()}")
+            logger.info(f"Ground truth quantity: {tgt_tokens['quantity'][0, :10]}")
 
             if isinstance(output_logits, dict):
                 decoded = {}
                 for key in output_logits:
-                    pred = decode_val(key, output_logits)
+                    use_argmax = key in ['type', 'material', 'location', 'source_location', 'start_time', 'end_time', 'request_time', 'commit_time', 'demand']
+                    pred = decode_val(key, output_logits, use_argmax=use_argmax)
+                    #pred = decode_val(key, output_logits)
                     decoded[key] = pred
 
                 logger.info("🔢 Predicted next token:")

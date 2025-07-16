@@ -34,7 +34,7 @@ console_handler.setFormatter(formatter)
 
 # Get the root logger and set the level
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)  # Set global log level here
+logger.setLevel(logging.DEBUG)  # Set global log level here
 
 # Add both handlers to the logger
 logger.addHandler(rotating_handler)
@@ -70,7 +70,7 @@ config = {
     'dropout': 0.1,
     'batch_size': 8,
     'lr': 1e-4,
-    'epochs': 10,
+    'epochs': 5,
     'checkpoint_path': 'scm_transformer.pt',
     "max_train_samples": 1000
 }
@@ -230,7 +230,7 @@ class SCMTransformerModel(nn.Module):
 
         return logits + allowed_mask
 
-    def apply_field_constraints(self, logits_dict, prev_tokens):
+    def _apply_field_constraints(self, logits_dict, prev_tokens):
         MASK_VAL = -1e9  # safer alternative to float('-inf')
 
         batch_size = prev_tokens['type'].size(0)
@@ -266,7 +266,7 @@ class SCMTransformerModel(nn.Module):
 
         return logits_dict
     
-    def _apply_field_constraints(self, logits_dict, prev_tokens):
+    def apply_field_constraints(self, logits_dict, prev_tokens):
         MASK_VAL = -1e9  # safer alternative to float('-inf')
 
         batch_size = prev_tokens['type'].size(0)
@@ -586,7 +586,147 @@ loss_weights = {'type': 1.0,
     'start_time': 1.0, 'end_time': 1.0, 'request_time': 1.0,
     'commit_time': 1.0, 'quantity': 1.0
 }
+
 def train_stepwise(model=None, depth=None):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if model is None:
+        model = SCMTransformerModel(config).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=5)
+
+    sample_path = os.path.join('data', 'logs', f'depth_{depth}')
+    if not os.path.exists(sample_path):
+        logger.info(f'sample data {sample_path} does not exist, exit ...')
+        return
+
+    dataset = SCMDataset(sample_path)
+    train_set, val_set = torch.utils.data.random_split(dataset, [int(0.8 * len(dataset)), len(dataset) - int(0.8 * len(dataset))])
+    train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
+
+    model.train()
+    for epoch in range(config['epochs']):
+        total_loss = 0.0
+        for src, tgt, labels in train_loader:
+            src = {k: v.to(device) for k, v in src.items()}
+            tgt = {k: v.to(device) for k, v in tgt.items()}
+            labels = {k: v.to(device) for k, v in labels.items()}
+            tgt_len = tgt['material'].shape[1]
+
+            tgt_tokens = {
+                key: tgt[key][:, :1].clone()
+                for key in tgt
+            }
+
+            loss_accum = 0.0
+            for t in range(1, tgt_len):
+                pred = model(src, tgt_tokens)
+                last_pred = {k: v[:, -1] for k, v in pred.items()}
+
+                loss_items = defaultdict(float)
+
+                for k in ['type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
+                    logits = last_pred[k]
+                    target = labels[k][:, t]
+                    max_val = target.max().item()
+                    min_val = target.min().item()
+
+                    logger.debug(f"🧪 {k} logits.shape={logits.shape}, target={target.tolist()}, min_val={min_val}, max_val={max_val}")
+
+                    try:
+                        if max_val >= logits.shape[-1] or min_val < 0:
+                            logger.warning(f"⚠️ Invalid target for {k}: {target.tolist()} (logits.shape={logits.shape}, min={min_val}, max={max_val})")
+                            raise ValueError("Target out of bounds")
+                        loss_items[k] = F.cross_entropy(logits, target)
+                        if not torch.isfinite(loss_items[k]):
+                            raise ValueError("Non-finite loss")
+                    except Exception as e:
+                        logger.error(f"❌ Skipping loss[{k}] due to {str(e)}")
+                        logger.debug(f"  logits = {logits}")
+                        logger.debug(f"  target = {target}")
+                        loss_items[k] = torch.tensor(1e9, device=device)
+
+                loss_items['quantity'] = F.mse_loss(last_pred['quantity'].squeeze(-1), labels['quantity'][:, t])
+
+                for k, v in loss_items.items():
+                    logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
+
+                loss = sum(loss_weights[k] * loss_items[k] for k in loss_items)
+
+                loss_accum += loss
+                for key in tgt_tokens:
+                    val = tgt[key][:, t].unsqueeze(1)
+                    tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
+
+            optimizer.zero_grad()
+            loss_accum.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            total_loss += loss_accum.item()
+
+        scheduler.step(total_loss)
+        if scheduler.num_bad_epochs == 0:
+            logger.info(f"📉 Learning rate reduced to {optimizer.param_groups[0]['lr']:.6f}")
+
+        for param_group in optimizer.param_groups:
+            logger.info(f"📉 Learning rate: {param_group['lr']:.6f}")
+
+        logger.info(f"Epoch {epoch+1}/{config['epochs']} - Stepwise Loss: {total_loss:.4f}")
+
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for src, tgt, labels in val_loader:
+                src = {k: v.to(device) for k, v in src.items()}
+                tgt = {k: v.to(device) for k, v in tgt.items()}
+                labels = {k: v.to(device) for k, v in labels.items()}
+                tgt_len = tgt['material'].shape[1]
+
+                tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
+
+                loss_accum = 0.0
+                for t in range(tgt_len):
+                    pred = model(src, tgt_tokens)
+                    last_pred = {k: v[:, -1] for k, v in pred.items()}
+
+                    loss_items = defaultdict(float)
+                    for k in ['demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
+                        logits = last_pred[k]
+                        target = labels[k][:, t]
+                        max_val = target.max().item()
+                        min_val = target.min().item()
+
+                        try:
+                            if max_val >= logits.shape[-1] or min_val < 0:
+                                raise ValueError("Target out of bounds")
+                            loss_items[k] = F.cross_entropy(logits, target)
+                            if not torch.isfinite(loss_items[k]):
+                                raise ValueError("Non-finite loss")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Validation loss[{k}] skipped: {str(e)}")
+                            loss_items[k] = torch.tensor(1e9, device=device)
+
+                    try:
+                        loss_items['quantity'] = F.mse_loss(last_pred['quantity'].squeeze(-1), labels['quantity'][:, t])
+                    except Exception as e:
+                        logger.warning(f"⚠️ Validation loss[quantity] skipped: {str(e)}")
+                        loss_items['quantity'] = torch.tensor(1e9, device=device)
+
+                    val_loss_step = sum(loss_weights.get(k, 1.0) * loss_items[k] for k in loss_items)
+                    loss_accum += val_loss_step
+
+                    for key in tgt_tokens:
+                        val = tgt[key][:, t].unsqueeze(1)
+                        tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
+
+                val_loss += loss_accum.item()
+        model.train()
+        logger.info(f"🔍 Validation Loss: {val_loss:.4f}")
+
+    torch.save(model.state_dict(), config['checkpoint_path'])
+    logger.info(f"✅ Model saved to {config['checkpoint_path']}")
+
+def _train_stepwise(model=None, depth=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if model is None:
         model = SCMTransformerModel(config).to(device)
@@ -627,16 +767,31 @@ def train_stepwise(model=None, depth=None):
                 pred = model(src, tgt_tokens)
                 last_pred = {k: v[:, -1] for k, v in pred.items()}
 
+                loss_items = defaultdict(float)
+
+                loss_items['type'] = F.cross_entropy(last_pred['type'], labels['type'][:, t]) 
+                loss_items['demand'] = F.cross_entropy(last_pred['demand'], labels['demand'][:, t]) 
+                loss_items['material'] = F.cross_entropy(last_pred['material'], labels['material'][:, t]) 
+                loss_items['location'] = F.cross_entropy(last_pred['location'], labels['location'][:, t]) 
+                loss_items['start_time'] = F.cross_entropy(last_pred['start_time'], labels['start_time'][:, t]) 
+                loss_items['end_time'] = F.cross_entropy(last_pred['end_time'], labels['end_time'][:, t]) 
+                loss_items['request_time'] = F.cross_entropy(last_pred['request_time'], labels['request_time'][:, t]) 
+                loss_items['commit_time'] = F.cross_entropy(last_pred['commit_time'], labels['commit_time'][:, t]) 
+                loss_items['quantity'] = F.mse_loss(last_pred['quantity'], labels['quantity'][:, t])
+
+                for k, v in loss_items.items():
+                    logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
+
                 loss = (
-                    loss_weights['type'] * F.cross_entropy(last_pred['type'], labels['type'][:, t]) +
-                    loss_weights['demand'] * F.cross_entropy(last_pred['demand'], labels['demand'][:, t]) +
-                    loss_weights['material'] * F.cross_entropy(last_pred['material'], labels['material'][:, t]) +
-                    loss_weights['location'] * F.cross_entropy(last_pred['location'], labels['location'][:, t]) +
-                    loss_weights['start_time'] * F.cross_entropy(last_pred['start_time'], labels['start_time'][:, t]) +
-                    loss_weights['end_time'] * F.cross_entropy(last_pred['end_time'], labels['end_time'][:, t]) +
-                    loss_weights['request_time'] * F.cross_entropy(last_pred['request_time'], labels['request_time'][:, t]) +
-                    loss_weights['commit_time'] * F.cross_entropy(last_pred['commit_time'], labels['commit_time'][:, t]) +
-                    loss_weights['quantity'] * F.mse_loss(last_pred['quantity'], labels['quantity'][:, t])
+                    loss_weights['type'] * loss_items['type'] +
+                    loss_weights['demand'] * loss_items['demand']+
+                    loss_weights['material'] * loss_items['material'] +
+                    loss_weights['location'] * loss_items['location'] +
+                    loss_weights['start_time'] * loss_items['start_time'] +
+                    loss_weights['end_time'] * loss_items['end_time'] +
+                    loss_weights['request_time'] * loss_items['request_time'] +
+                    loss_weights['commit_time'] * loss_items['commit_time'] +
+                    loss_weights['quantity'] * loss_items['quantity']
                 )
 
                 loss_accum += loss
@@ -853,6 +1008,18 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
             with torch.no_grad():
                 out = model(src_tokens, tgt_tokens)
 
+            #logger.info(f"out = model(src_tokens, tgt_tokens); out['material'][0].size(0) = {out['material'][0].size(0)}, ")
+            #decoded = {}
+            #for key in out:
+            #    use_argmax = key in ['type', 'material', 'location', 'source_location', 'start_time', 'end_time', 'request_time', 'commit_time', 'demand']
+            #    pred = decode_val(key, out, use_argmax=use_argmax)
+            #    #pred = decode_val(key, output_logits)
+            #    decoded[key] = pred
+            #logger.info("🔢 Predicted next token:")
+            #for k, v in decoded.items():
+            #    logger.info(f"  {k}: {v}")
+
+
             material_logits = out['material'][0, -1]
 
             if sampling == "topk":
@@ -891,10 +1058,10 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
                 q = denormalize_quantity(float(q_raw[0]) if isinstance(q_raw, list) else float(q_raw))
                 d = decode_val("demand", out)
 
-                if t > 3:
-                    continue
-                if q < threshold:
-                    continue
+                #if t >= 3:
+                #    continue
+                #if q < threshold:
+                #    continue
 
                 work_order = {
                     "id": next_id,
@@ -909,10 +1076,10 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
                     "type": t
                 }
 
-                if violates_constraints(plan, work_order):
-                    continue
-                if not is_valid_successor(plan, work_order):
-                    continue
+                #if violates_constraints(plan, work_order):
+                #    continue
+                #if not is_valid_successor(plan, work_order):
+                #    continue
 
                 new_val = {
                     'demand': d, 'type': t, 'location': l, 'material': m, 'time': s,
@@ -1008,12 +1175,14 @@ def generate_encoder_input(input_dict):
 
 # Patch --- Update predict_plan to use generate_encoder_input()
 def predict_plan(model, input_example, threshold=0.5):
-    logger.info("📦 Input to generate_candidate_tokens:", input_example["input"])
+    logger.info(f"📦 Input to generate_candidate_tokens: {input_example["input"]}")
     src_tokens = generate_encoder_input(input_example["input"])
 
     for k in src_tokens:
         if src_tokens[k].dim() == 1:
             src_tokens[k] = src_tokens[k].unsqueeze(0)
+    
+    #logger.info(f"src_tokens['type']: {src_tokens['type'][0].tolist()}")
 
     bom = load_bom("data/bom.csv")
     plan = decode_predictions(
@@ -1091,7 +1260,7 @@ def main():
         input_example = {
             "input": {
                 "demand": [
-                    {"demand_id": 0, "location_id": 0, "material_id": 7, "request_time": 8,  "time": 8, "start_time": 0, "end_time": 1, "quantity": 796},
+                    {"type": 0, "demand_id": 0, "location_id": 1, "material_id": 88, "request_time": 9,  "time": 8, "start_time": 0, "end_time": 1, "quantity": 11},
                 ]
             },
             "tgt": []

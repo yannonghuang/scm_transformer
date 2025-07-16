@@ -72,8 +72,16 @@ config = {
     'lr': 1e-4,
     'epochs': 5,
     'checkpoint_path': 'scm_transformer.pt',
-    "max_train_samples": 1000
+    "max_train_samples": 1000,
+    'quantity_scale': 10.0,  # updated to allow integer binning
+    'max_quantity': 1e5
 }
+
+def dequantize_quantity(q_class):
+    return q_class * config['quantity_scale']
+
+#def dequantize_quantity(bin_idx, scale):
+#    return (bin_idx + 0.5) * scale
 
 bom_map = defaultdict(set)
 def load_bom(path="data/bom.csv") -> dict[int, set[int]]:
@@ -102,11 +110,14 @@ class SCMEmbedding(nn.Module):
         self.mat_emb = nn.Embedding(config['num_materials'], d_model)
         self.method_emb = nn.Embedding(config['num_methods'], d_model)
 
-        self.quantity_proj = nn.Sequential(
-            nn.Linear(1, d_model),
-            nn.ReLU(),
-            nn.LayerNorm(d_model)
-        )
+        num_quantity_bins = int(1e6 // config['quantity_scale'])
+        self.quantity_emb = nn.Embedding(num_quantity_bins, d_model)
+
+        #self.quantity_proj = nn.Sequential(
+        #    nn.Linear(1, d_model),
+        #    nn.ReLU(),
+        #    nn.LayerNorm(d_model)
+        #)
 
         self.dropout = nn.Dropout(config['dropout'])
 
@@ -135,7 +146,12 @@ class SCMEmbedding(nn.Module):
         e_demand = self.demand_emb(tokens['demand'])
         e_mat = self.mat_emb(tokens['material'])
         e_method = self.method_emb(tokens['method'])
-        e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
+
+
+        # Convert float quantity to bin index
+        quantity_bins = (tokens['quantity'].float() / config['quantity_scale']).long().clamp(min=0, max=self.quantity_emb.num_embeddings - 1)
+        e_qty = self.quantity_emb(quantity_bins)
+        #e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
 
         # BOM-specific
         e_parent = self.mat_emb(tokens['parent'])
@@ -195,6 +211,9 @@ class SCMTransformerModel(nn.Module):
 
         self.quantity_out = nn.Linear(d_model, 1)
         self.method_out = nn.Linear(d_model, config['num_methods'])
+
+        self.quantity_out = nn.Linear(d_model, int(1e6 // config['quantity_scale']))
+
         #self.ref_id_out = nn.Linear(d_model, 64)  # Assume 64 is max number of ref_ids
         #self.depends_on_out = nn.Linear(d_model, 64)  # Same assumption
 
@@ -230,7 +249,7 @@ class SCMTransformerModel(nn.Module):
 
         return logits + allowed_mask
 
-    def _apply_field_constraints(self, logits_dict, prev_tokens):
+    def apply_field_constraints(self, logits_dict, prev_tokens):
         MASK_VAL = -1e9  # safer alternative to float('-inf')
 
         batch_size = prev_tokens['type'].size(0)
@@ -243,6 +262,8 @@ class SCMTransformerModel(nn.Module):
 
                 if last['type'] == get_token_type('demand'): #1:  demand
                     logits_dict['end_time'][b, seq, last['commit_time'] + 1:] = MASK_VAL # float('-inf')
+                else:
+                    logits_dict['end_time'][b, seq, last['start_time'] + 1:] = MASK_VAL # float('-inf')
 
                 if last['type'] == get_token_type('move'):  # move
                     logits_dict['location'][b, seq, :] = MASK_VAL # float('-inf')
@@ -257,16 +278,39 @@ class SCMTransformerModel(nn.Module):
                 logits_dict['material'][b, seq, :] = MASK_VAL # float('-inf')
                 logits_dict['material'][b, seq, last['material']] = 0.0
 
-                logits_dict['end_time'][b, seq, last['start_time'] + 1:] = MASK_VAL # float('-inf')
+                
 
                 # Enforce quantity equality
-                if 'quantity' in logits_dict:
-                    logits_dict['quantity'][b, seq] = MASK_VAL # float('-inf')
-                    logits_dict['quantity'][b, seq] = last['quantity']
+                #if 'quantity' in logits_dict:
+                #    logits_dict['quantity'][b, seq] = MASK_VAL # float('-inf')
+                #    logits_dict['quantity'][b, seq] = last['quantity']
 
+                logits_dict['quantity'][b, seq, :] = MASK_VAL # float('-inf')
+                logits_dict['quantity'][b, seq, last['quantity']] = 0.0
+
+        # additional constraints
+        
+        next_type = logits_dict['type'].argmax(dim=-1)
+        demand_type = get_token_type('demand')
+        make_type = get_token_type('make')
+        purchase_type = get_token_type('purchase')
+        move_type = get_token_type('move')
+
+        for b in range(next_type.size(0)):
+                for t in range(next_type.size(1)):
+                    t_type = next_type[b, t].item()
+                    if t_type == demand_type:
+                        shared_time = logits_dict['commit_time'][b, t]
+                        logits_dict['start_time'][b, t] = shared_time
+                        logits_dict['end_time'][b, t] = shared_time
+                    elif t_type in (make_type, purchase_type, move_type):
+                        shared_time = logits_dict['end_time'][b, t]
+                        logits_dict['request_time'][b, t] = shared_time
+                        logits_dict['commit_time'][b, t] = shared_time
+        
         return logits_dict
     
-    def apply_field_constraints(self, logits_dict, prev_tokens):
+    def _apply_field_constraints(self, logits_dict, prev_tokens):
         MASK_VAL = -1e9  # safer alternative to float('-inf')
 
         batch_size = prev_tokens['type'].size(0)
@@ -294,8 +338,10 @@ class SCMTransformerModel(nn.Module):
 
             # Enforce quantity equality
             if 'quantity' in logits_dict:
-                logits_dict['quantity'][b, :] = MASK_VAL # float('-inf')
-                logits_dict['quantity'][b, -1] = last['quantity']
+                #logits_dict['quantity'][b, :] = MASK_VAL # float('-inf')
+                #logits_dict['quantity'][b, -1] = last['quantity']
+                logits_dict['quantity'][b, :, :] = MASK_VAL # float('-inf')
+                logits_dict['quantity'][b, :, last['quantity']] = 0.0
 
         return logits_dict
 
@@ -329,7 +375,10 @@ class SCMTransformerModel(nn.Module):
             'end_time': self.end_time_out(decoded),
             'request_time': self.request_time_out(decoded),
             'commit_time': self.commit_time_out(decoded),            
-            'quantity': quantity_pred, #self.quantity_out(decoded).squeeze(-1),
+
+            'quantity': self.quantity_out(decoded),
+            #'quantity': quantity_pred, #self.quantity_out(decoded).squeeze(-1),
+
             #'method': self.method_out(decoded),
             #'parent': self.material_out(decoded),
             #'child': self.material_out(decoded),
@@ -353,15 +402,21 @@ class SCMTransformerModel(nn.Module):
             logger.info("\n🔎 Debug Forward Pass:")
             #print("src_tokens['type']:", src_tokens['type'][0].tolist())
             logger.info(f"tgt_tokens['type']: {tgt_tokens['type'][0].tolist()}")
-            logger.info(f"Output logits['quantity']: {output_logits['quantity'][0, -1].detach().cpu().numpy()}")
+            #logger.info(f"Output logits['quantity']: {output_logits['quantity'][0, -1].detach().cpu().numpy()}")
+            #logger.info(f"Ground truth quantity: {tgt_tokens['quantity'][0, :10]}")
+            logger.info(f"Output logits['quantity'] (bin idx): {output_logits['quantity'][0, -1].argmax(-1).item()}")
+            logger.info(f"Predicted quantity: {dequantize_quantity(output_logits['quantity'][0, -1].argmax(-1))}")
             logger.info(f"Ground truth quantity: {tgt_tokens['quantity'][0, :10]}")
 
             if isinstance(output_logits, dict):
                 decoded = {}
                 for key in output_logits:
-                    use_argmax = key in ['type', 'material', 'location', 'source_location', 'start_time', 'end_time', 'request_time', 'commit_time', 'demand']
+                    use_argmax = True
+                    #use_argmax = key in ['type', 'material', 'location', 'source_location', 'start_time', 'end_time', 'request_time', 'commit_time', 'demand']
                     pred = decode_val(key, output_logits, use_argmax=use_argmax)
                     #pred = decode_val(key, output_logits)
+                    if key == 'quantity':
+                        pred = dequantize_quantity(pred)
                     decoded[key] = pred
 
                 logger.info("🔢 Predicted next token:")
@@ -465,7 +520,9 @@ def encode_tokens(token_list, token_type_id=1):
         'commit_time': to_tensor("commit_time"),
         'demand': to_tensor("demand"),
         'method': to_tensor("method"),
-        'quantity': to_tensor("quantity", dtype=torch.float),
+
+        'quantity': to_tensor("quantity"),
+        #'quantity': to_tensor("quantity", dtype=torch.float),
 
         'parent': to_tensor("parent"),
         'child': to_tensor("child"),
@@ -509,7 +566,10 @@ class SCMDataset(Dataset):
             "location": torch.tensor(df["location_id"].values, dtype=torch.long),
             "material": torch.tensor(df["material_id"].values, dtype=torch.long),
             "time": torch.tensor(df["request_time"].values, dtype=torch.long),
-            "quantity": torch.tensor(df["quantity"].values, dtype=torch.float),
+
+            #"quantity": torch.tensor(df["quantity"].values, dtype=torch.float),
+            "quantity": torch.tensor(df["quantity"].values, dtype=torch.long),
+
             "start_time": torch.zeros((len(df)), dtype=torch.long),
             "end_time": torch.zeros((len(df)), dtype=torch.long),
             "request_time": torch.tensor(df["request_time"].values, dtype=torch.long),
@@ -551,7 +611,8 @@ class SCMDataset(Dataset):
             #"method_id": torch.zeros((1, len(df)), dtype=torch.long),
             "method": torch.zeros((len(df)), dtype=torch.long),
 
-            "quantity": torch.tensor(df["quantity"].values, dtype=torch.float), #.unsqueeze(0),
+            #"quantity": torch.tensor(df["quantity"].values, dtype=torch.float), #.unsqueeze(0),
+            "quantity": torch.tensor(df["quantity"].values, dtype=torch.long),
 
             "parent": torch.zeros((len(df)), dtype=torch.long),
             "child": torch.zeros((len(df)), dtype=torch.long),
@@ -604,6 +665,11 @@ def train_stepwise(model=None, depth=None):
     train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
 
+    def quantize_quantity(q):
+        q_clip = q.clamp(min=0, max=config['max_quantity'])
+        q_scaled = (q_clip / config['quantity_scale']).round().long()
+        return q_scaled
+
     model.train()
     for epoch in range(config['epochs']):
         total_loss = 0.0
@@ -646,7 +712,9 @@ def train_stepwise(model=None, depth=None):
                         logger.debug(f"  target = {target}")
                         loss_items[k] = torch.tensor(1e9, device=device)
 
-                loss_items['quantity'] = F.mse_loss(last_pred['quantity'].squeeze(-1), labels['quantity'][:, t])
+                pred_q_class = last_pred['quantity']
+                target_q_class = quantize_quantity(labels['quantity'][:, t])
+                loss_items['quantity'] = F.cross_entropy(pred_q_class, target_q_class)
 
                 for k, v in loss_items.items():
                     logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
@@ -707,7 +775,9 @@ def train_stepwise(model=None, depth=None):
                             loss_items[k] = torch.tensor(1e9, device=device)
 
                     try:
-                        loss_items['quantity'] = F.mse_loss(last_pred['quantity'].squeeze(-1), labels['quantity'][:, t])
+                        pred_q_class = last_pred['quantity']
+                        target_q_class = quantize_quantity(labels['quantity'][:, t])
+                        loss_items['quantity'] = F.cross_entropy(pred_q_class, target_q_class)
                     except Exception as e:
                         logger.warning(f"⚠️ Validation loss[quantity] skipped: {str(e)}")
                         loss_items['quantity'] = torch.tensor(1e9, device=device)

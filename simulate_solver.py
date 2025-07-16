@@ -43,7 +43,9 @@ def create_work_order(demand_id, method, start_time, end_time, quantity):
         'bom_id': method.get('bom_id', None),
         'start_time': start_time,
         'end_time': end_time,
-        'quantity': quantity
+        'quantity': quantity,
+        'request_time': end_time,
+        'commit_time': end_time,
     }
 
 # --- Recursive Solver ---
@@ -89,6 +91,8 @@ def solve_demand(d, methods, bom, now):
 
     wo = create_work_order(demand_id, method, start_time, end_time, quantity)
     d['commit_time'] = end_time
+    d['start_time'] = end_time
+    d['end_time'] = end_time
     #return d, child_wos + [wo]
     return d, [wo] + child_wos
 

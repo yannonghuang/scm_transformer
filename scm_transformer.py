@@ -750,10 +750,10 @@ def train_stepwise(model=None, depth=None):
                             
                         if (
                             field_loss is not None 
-                            #and isinstance(field_loss, torch.Tensor) 
-                            #and field_loss.requires_grad 
-                            #and field_loss.numel() == 1 
-                            #and field_loss.item() < -MASK_VAL
+                            and isinstance(field_loss, torch.Tensor) 
+                            and field_loss.requires_grad 
+                            and field_loss.numel() == 1 
+                            and field_loss.item() < -MASK_VAL
                         ):
                             loss_items[k] = field_loss
 
@@ -769,8 +769,8 @@ def train_stepwise(model=None, depth=None):
                         '''
                         
 
-                        if not torch.isfinite(loss_items[k]):
-                            raise ValueError("Non-finite loss")
+                        #if not torch.isfinite(loss_items[k]):
+                        #    raise ValueError("Non-finite loss")
                     except Exception as e:
                         logger.error(f"❌ Skipping loss[{k}] due to {str(e)}")
                         logger.debug(f"  logits = {logits}")
@@ -844,10 +844,10 @@ def train_stepwise(model=None, depth=None):
                                 field_loss = compute_loss(logits, target)
                             if (
                                     field_loss is not None 
-                                    #and isinstance(field_loss, torch.Tensor) 
-                                    #and field_loss.requires_grad 
-                                    #and field_loss.numel() == 1 
-                                    #and field_loss.item() < -MASK_VAL
+                                    and isinstance(field_loss, torch.Tensor) 
+                                    and field_loss.requires_grad 
+                                    and field_loss.numel() == 1 
+                                    and field_loss.item() < -MASK_VAL
                                 ):
                                 loss_items[k] = field_loss
 
@@ -865,8 +865,8 @@ def train_stepwise(model=None, depth=None):
                                 loss_items[k] = F.cross_entropy(logits, target)
                             '''
 
-                            if not torch.isfinite(loss_items[k]):
-                                raise ValueError("Non-finite loss")
+                            #if not torch.isfinite(loss_items[k]):
+                            #    raise ValueError("Non-finite loss")
                         except Exception as e:
                             logger.warning(f"⚠️ Validation loss[{k}] skipped: {str(e)}")
                             loss_items[k] = torch.tensor(1e9, device=device)
@@ -886,8 +886,10 @@ def train_stepwise(model=None, depth=None):
                     for key in tgt_tokens:
                         val = tgt[key][:, t].unsqueeze(1)
                         tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
-
-                val_loss += loss_accum.item()
+                try:
+                    val_loss += loss_accum.item()
+                except Exception as e:
+                    val_loss += loss_accum
         model.train()
         logger.info(f"🔍 Validation Loss: {val_loss:.4f}")
 

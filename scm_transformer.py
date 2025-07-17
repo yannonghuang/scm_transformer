@@ -73,8 +73,8 @@ config = {
     'epochs': 5,
     'checkpoint_path': 'scm_transformer.pt',
     "max_train_samples": 1000,
-    'quantity_scale': 10.0,  # updated to allow integer binning
-    'max_quantity': 1e5
+    'quantity_scale': 1,  # updated to allow integer binning
+    'max_quantity': 1000 #1e5
 }
 
 def dequantize_quantity(q_class):
@@ -110,8 +110,9 @@ class SCMEmbedding(nn.Module):
         self.mat_emb = nn.Embedding(config['num_materials'], d_model)
         self.method_emb = nn.Embedding(config['num_methods'], d_model)
 
-        num_quantity_bins = int(1e6 // config['quantity_scale'])
-        self.quantity_emb = nn.Embedding(num_quantity_bins, d_model)
+        #num_quantity_bins = int(1e6 // config['quantity_scale'])
+        #self.quantity_emb = nn.Embedding(num_quantity_bins, d_model)
+        self.quantity_emb = nn.Embedding(config['max_quantity'], d_model)
 
         #self.quantity_proj = nn.Sequential(
         #    nn.Linear(1, d_model),
@@ -149,8 +150,8 @@ class SCMEmbedding(nn.Module):
 
 
         # Convert float quantity to bin index
-        quantity_bins = (tokens['quantity'].float() / config['quantity_scale']).long().clamp(min=0, max=self.quantity_emb.num_embeddings - 1)
-        e_qty = self.quantity_emb(quantity_bins)
+        #quantity_bins = (tokens['quantity'].float() / config['quantity_scale']).long().clamp(min=0, max=self.quantity_emb.num_embeddings - 1)
+        e_qty = self.quantity_emb(tokens['quantity'])
         #e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
 
         # BOM-specific
@@ -209,10 +210,11 @@ class SCMTransformerModel(nn.Module):
         self.request_time_out = nn.Linear(d_model, config['num_time_steps'])
         self.commit_time_out = nn.Linear(d_model, config['num_time_steps'])
 
-        self.quantity_out = nn.Linear(d_model, 1)
+        #self.quantity_out = nn.Linear(d_model, 1)
         self.method_out = nn.Linear(d_model, config['num_methods'])
 
-        self.quantity_out = nn.Linear(d_model, int(1e6 // config['quantity_scale']))
+        #self.quantity_out = nn.Linear(d_model, int(1e6 // config['quantity_scale']))
+        self.quantity_out = nn.Linear(d_model, config['max_quantity'])
 
         #self.ref_id_out = nn.Linear(d_model, 64)  # Assume 64 is max number of ref_ids
         #self.depends_on_out = nn.Linear(d_model, 64)  # Same assumption
@@ -248,14 +250,50 @@ class SCMTransformerModel(nn.Module):
                     allowed_mask[b, :, mat_id] = 0.0
 
         return logits + allowed_mask
-
+ 
     def apply_field_constraints(self, logits_dict, prev_tokens):
         MASK_VAL = -1e9  # safer alternative to float('-inf')
 
         batch_size = prev_tokens['type'].size(0)
 
         for b in range(batch_size):
-            seq_size = prev_tokens['type'][b].size(0)
+            last = {k: prev_tokens[k][b][-1].item() for k in prev_tokens}
+
+            if last['type'] == get_token_type('demand'): #1:  demand
+                logits_dict['end_time'][b, :, last['commit_time'] + 1:] = MASK_VAL # float('-inf')
+
+            if last['type'] == get_token_type('move'):  # move
+                logits_dict['location'][b, :, :] = MASK_VAL # float('-inf')
+                logits_dict['location'][b, :, last['source_location']] = 0.0
+            else:
+                logits_dict['location'][b, :, :] = MASK_VAL # float('-inf')
+                logits_dict['location'][b, :, last['location']] = 0.0
+
+            logits_dict['demand'][b, :, :] = MASK_VAL # float('-inf')
+            logits_dict['demand'][b, :, last['demand']] = 0.0
+
+            logits_dict['material'][b, :, :] = MASK_VAL # float('-inf')
+            logits_dict['material'][b, :, last['material']] = 0.0
+
+            logits_dict['end_time'][b, :, last['start_time'] + 1:] = MASK_VAL # float('-inf')
+
+            # Enforce quantity equality
+            if 'quantity' in logits_dict:
+                #logits_dict['quantity'][b, :] = MASK_VAL # float('-inf')
+                #logits_dict['quantity'][b, -1] = last['quantity']
+                logits_dict['quantity'][b, :, :] = MASK_VAL # float('-inf')
+                logits_dict['quantity'][b, :, last['quantity']] = 0.0
+
+        return logits_dict
+
+    def _apply_field_constraints(self, logits_dict, prev_tokens):
+        MASK_VAL = -1e9  # safer alternative to float('-inf')
+
+        batch_size = prev_tokens['type'].size(0)
+
+        for b in range(batch_size):
+            #seq_size = prev_tokens['type'][b].size(0)
+            seq_size = prev_tokens['type'].size(1)
             for seq in range(seq_size):
 
                 last = {k: prev_tokens[k][b][seq].item() for k in prev_tokens}
@@ -309,43 +347,7 @@ class SCMTransformerModel(nn.Module):
                         logits_dict['commit_time'][b, t] = shared_time
         
         return logits_dict
-    
-    def _apply_field_constraints(self, logits_dict, prev_tokens):
-        MASK_VAL = -1e9  # safer alternative to float('-inf')
-
-        batch_size = prev_tokens['type'].size(0)
-
-        for b in range(batch_size):
-            last = {k: prev_tokens[k][b][-1].item() for k in prev_tokens}
-
-            if last['type'] == get_token_type('demand'): #1:  demand
-                logits_dict['end_time'][b, :, last['commit_time'] + 1:] = MASK_VAL # float('-inf')
-
-            if last['type'] == get_token_type('move'):  # move
-                logits_dict['location'][b, :, :] = MASK_VAL # float('-inf')
-                logits_dict['location'][b, :, last['source_location']] = 0.0
-            else:
-                logits_dict['location'][b, :, :] = MASK_VAL # float('-inf')
-                logits_dict['location'][b, :, last['location']] = 0.0
-
-            logits_dict['demand'][b, :, :] = MASK_VAL # float('-inf')
-            logits_dict['demand'][b, :, last['demand']] = 0.0
-
-            logits_dict['material'][b, :, :] = MASK_VAL # float('-inf')
-            logits_dict['material'][b, :, last['material']] = 0.0
-
-            logits_dict['end_time'][b, :, last['start_time'] + 1:] = MASK_VAL # float('-inf')
-
-            # Enforce quantity equality
-            if 'quantity' in logits_dict:
-                #logits_dict['quantity'][b, :] = MASK_VAL # float('-inf')
-                #logits_dict['quantity'][b, -1] = last['quantity']
-                logits_dict['quantity'][b, :, :] = MASK_VAL # float('-inf')
-                logits_dict['quantity'][b, :, last['quantity']] = 0.0
-
-        return logits_dict
-
-    
+       
     def forward(self, src_tokens, tgt_tokens, bom_edges=None):
         assert (src_tokens['demand'] < config['num_demands']).all(), "demand_id out of range"
         assert (src_tokens['material'] < config['num_materials']).all(), "material_id out of range"
@@ -405,7 +407,8 @@ class SCMTransformerModel(nn.Module):
             #logger.info(f"Output logits['quantity']: {output_logits['quantity'][0, -1].detach().cpu().numpy()}")
             #logger.info(f"Ground truth quantity: {tgt_tokens['quantity'][0, :10]}")
             logger.info(f"Output logits['quantity'] (bin idx): {output_logits['quantity'][0, -1].argmax(-1).item()}")
-            logger.info(f"Predicted quantity: {dequantize_quantity(output_logits['quantity'][0, -1].argmax(-1))}")
+            #logger.info(f"Predicted quantity: {dequantize_quantity(output_logits['quantity'][0, -1].argmax(-1))}")
+            logger.info(f"Predicted quantity: {output_logits['quantity'][0, -1].argmax(-1)}")
             logger.info(f"Ground truth quantity: {tgt_tokens['quantity'][0, :10]}")
 
             if isinstance(output_logits, dict):
@@ -415,8 +418,8 @@ class SCMTransformerModel(nn.Module):
                     #use_argmax = key in ['type', 'material', 'location', 'source_location', 'start_time', 'end_time', 'request_time', 'commit_time', 'demand']
                     pred = decode_val(key, output_logits, use_argmax=use_argmax)
                     #pred = decode_val(key, output_logits)
-                    if key == 'quantity':
-                        pred = dequantize_quantity(pred)
+                    #if key == 'quantity':
+                    #    pred = dequantize_quantity(pred)
                     decoded[key] = pred
 
                 logger.info("🔢 Predicted next token:")
@@ -529,10 +532,17 @@ def encode_tokens(token_list, token_type_id=1):
         #'token_type_id': torch.tensor([token_type_id] * len(token_list), dtype=torch.long)
     }
 
-def train():
+def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SCMTransformerModel(config).to(device)
-    max_depth = get_max_depth(load_bom_graph())
+
+    max_depth = None
+    if args.depth:
+        max_depth = (int)((vars(args))['depth'])
+        print(f"CLI gives max_depth = {max_depth}")
+    if max_depth is None:
+        max_depth = get_max_depth(load_bom_graph())
+
     for depth in range(1, max_depth + 1):
         logger.info(f"\n📚 Training on samples with BOM depth <= {depth}")
         train_stepwise(model, depth - 1)
@@ -648,7 +658,38 @@ loss_weights = {'type': 1.0,
     'commit_time': 1.0, 'quantity': 1.0
 }
 
+
+def compute_loss(logits, targets):
+    if logits.shape[:-1] != targets.shape:
+        return None  # shape mismatch, cannot compute loss
+
+    IGNORE_INDEX = -100  # this tells PyTorch to ignore these targets in loss
+    return F.cross_entropy(
+        logits.view(-1, logits.size(-1)),
+        targets.view(-1),
+        ignore_index=IGNORE_INDEX
+    )
+
+def _compute_loss(logits, targets):
+    MASK_THRESH = -1e5
+
+    B, T, V = logits.shape
+    logits = logits.view(B * T, V)
+    targets = targets.view(B * T)
+
+    logit_max = logits.max(dim=-1).values
+    valid = logit_max > MASK_THRESH
+
+    if valid.sum() == 0:
+        return logits.sum() * 0.0  # safely returns zero loss with gradient path
+
+    return F.cross_entropy(logits[valid], targets[valid], reduction='mean')
+
+
+
 def train_stepwise(model=None, depth=None):
+    MASK_VAL = -1e9
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if model is None:
         model = SCMTransformerModel(config).to(device)
@@ -664,11 +705,6 @@ def train_stepwise(model=None, depth=None):
     train_set, val_set = torch.utils.data.random_split(dataset, [int(0.8 * len(dataset)), len(dataset) - int(0.8 * len(dataset))])
     train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
-
-    def quantize_quantity(q):
-        q_clip = q.clamp(min=0, max=config['max_quantity'])
-        q_scaled = (q_clip / config['quantity_scale']).round().long()
-        return q_scaled
 
     model.train()
     for epoch in range(config['epochs']):
@@ -691,7 +727,7 @@ def train_stepwise(model=None, depth=None):
 
                 loss_items = defaultdict(float)
 
-                for k in ['type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
+                for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
                     logits = last_pred[k]
                     target = labels[k][:, t]
                     max_val = target.max().item()
@@ -703,7 +739,36 @@ def train_stepwise(model=None, depth=None):
                         if max_val >= logits.shape[-1] or min_val < 0:
                             logger.warning(f"⚠️ Invalid target for {k}: {target.tolist()} (logits.shape={logits.shape}, min={min_val}, max={max_val})")
                             raise ValueError("Target out of bounds")
-                        loss_items[k] = F.cross_entropy(logits, target)
+                        
+                        # Replace MASK_VAL with -100 for ignoring
+                        if isinstance(target, torch.Tensor) and (target == MASK_VAL).any():
+                            target = target.masked_fill(target == MASK_VAL, -100)
+                        
+                        field_loss = None
+                        if (logits.max(dim=-1).values > -1e6).any():                        
+                            field_loss = compute_loss(logits, target)
+                            
+                        if (
+                            field_loss is not None 
+                            #and isinstance(field_loss, torch.Tensor) 
+                            #and field_loss.requires_grad 
+                            #and field_loss.numel() == 1 
+                            #and field_loss.item() < -MASK_VAL
+                        ):
+                            loss_items[k] = field_loss
+
+                        #if logits.max().item() > -1e4:
+                        #    loss_items[k] = F.cross_entropy(logits, target)
+                        '''
+                        B, T, V = logits.shape
+                        logits_flat = logits.view(B * T, V)
+                        logit_max = logits_flat.max(dim=-1).values
+                        valid = logit_max > -1e5
+                        if valid.any():
+                            #loss_items[k] = compute_loss(logits, target)
+                        '''
+                        
+
                         if not torch.isfinite(loss_items[k]):
                             raise ValueError("Non-finite loss")
                     except Exception as e:
@@ -712,9 +777,11 @@ def train_stepwise(model=None, depth=None):
                         logger.debug(f"  target = {target}")
                         loss_items[k] = torch.tensor(1e9, device=device)
 
+                '''
                 pred_q_class = last_pred['quantity']
                 target_q_class = quantize_quantity(labels['quantity'][:, t])
                 loss_items['quantity'] = F.cross_entropy(pred_q_class, target_q_class)
+                '''
 
                 for k, v in loss_items.items():
                     logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
@@ -758,7 +825,7 @@ def train_stepwise(model=None, depth=None):
                     last_pred = {k: v[:, -1] for k, v in pred.items()}
 
                     loss_items = defaultdict(float)
-                    for k in ['demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
+                    for k in ['quantity', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
                         logits = last_pred[k]
                         target = labels[k][:, t]
                         max_val = target.max().item()
@@ -767,13 +834,43 @@ def train_stepwise(model=None, depth=None):
                         try:
                             if max_val >= logits.shape[-1] or min_val < 0:
                                 raise ValueError("Target out of bounds")
-                            loss_items[k] = F.cross_entropy(logits, target)
+                            
+                            # Replace MASK_VAL with -100 for ignoring
+                            if isinstance(target, torch.Tensor) and (target == MASK_VAL).any():
+                                target = target.masked_fill(target == MASK_VAL, -100)
+                            
+                            field_loss = None
+                            if (logits.max(dim=-1).values > -1e6).any():                        
+                                field_loss = compute_loss(logits, target)
+                            if (
+                                    field_loss is not None 
+                                    #and isinstance(field_loss, torch.Tensor) 
+                                    #and field_loss.requires_grad 
+                                    #and field_loss.numel() == 1 
+                                    #and field_loss.item() < -MASK_VAL
+                                ):
+                                loss_items[k] = field_loss
+
+                            #if logits.max().item() > -1e4:
+                            #    loss_items[k] = F.cross_entropy(logits, target)
+                            '''
+                            B, T, V = logits.shape
+                            logits_flat = logits.view(B * T, V)
+                            logit_max = logits_flat.max(dim=-1).values
+                            valid = logit_max > -1e5
+                            if valid.any():                            
+                                #loss_items[k] = compute_loss(logits, target)
+                                #loss_items[k] = F.cross_entropy(logits[valid], target[valid], reduction='mean')
+                                #loss_items[k] = F.cross_entropy(logits, target, reduction='mean')
+                                loss_items[k] = F.cross_entropy(logits, target)
+                            '''
+
                             if not torch.isfinite(loss_items[k]):
                                 raise ValueError("Non-finite loss")
                         except Exception as e:
                             logger.warning(f"⚠️ Validation loss[{k}] skipped: {str(e)}")
                             loss_items[k] = torch.tensor(1e9, device=device)
-
+                    '''
                     try:
                         pred_q_class = last_pred['quantity']
                         target_q_class = quantize_quantity(labels['quantity'][:, t])
@@ -781,6 +878,7 @@ def train_stepwise(model=None, depth=None):
                     except Exception as e:
                         logger.warning(f"⚠️ Validation loss[quantity] skipped: {str(e)}")
                         loss_items['quantity'] = torch.tensor(1e9, device=device)
+                    '''
 
                     val_loss_step = sum(loss_weights.get(k, 1.0) * loss_items[k] for k in loss_items)
                     loss_accum += val_loss_step
@@ -807,14 +905,16 @@ def _train_stepwise(model=None, depth=None):
     if not os.path.exists(sample_path):
         logger.info(f'sample data {sample_path} does not exist, exit ...')
         return
-    #os.makedirs(OUTDIR, exist_ok=True)
 
-    #dataset = SCMDataset("data/logs")
     dataset = SCMDataset(sample_path)
-
     train_set, val_set = torch.utils.data.random_split(dataset, [int(0.8 * len(dataset)), len(dataset) - int(0.8 * len(dataset))])
     train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
+
+    def quantize_quantity(q):
+        q_clip = q.clamp(min=0, max=config['max_quantity'])
+        q_scaled = (q_clip / config['quantity_scale']).round().long()
+        return q_scaled
 
     model.train()
     for epoch in range(config['epochs']):
@@ -825,8 +925,6 @@ def _train_stepwise(model=None, depth=None):
             labels = {k: v.to(device) for k, v in labels.items()}
             tgt_len = tgt['material'].shape[1]
 
-            #tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
-            # Start with the actual first token from the ground truth
             tgt_tokens = {
                 key: tgt[key][:, :1].clone()
                 for key in tgt
@@ -839,30 +937,37 @@ def _train_stepwise(model=None, depth=None):
 
                 loss_items = defaultdict(float)
 
-                loss_items['type'] = F.cross_entropy(last_pred['type'], labels['type'][:, t]) 
-                loss_items['demand'] = F.cross_entropy(last_pred['demand'], labels['demand'][:, t]) 
-                loss_items['material'] = F.cross_entropy(last_pred['material'], labels['material'][:, t]) 
-                loss_items['location'] = F.cross_entropy(last_pred['location'], labels['location'][:, t]) 
-                loss_items['start_time'] = F.cross_entropy(last_pred['start_time'], labels['start_time'][:, t]) 
-                loss_items['end_time'] = F.cross_entropy(last_pred['end_time'], labels['end_time'][:, t]) 
-                loss_items['request_time'] = F.cross_entropy(last_pred['request_time'], labels['request_time'][:, t]) 
-                loss_items['commit_time'] = F.cross_entropy(last_pred['commit_time'], labels['commit_time'][:, t]) 
-                loss_items['quantity'] = F.mse_loss(last_pred['quantity'], labels['quantity'][:, t])
+                for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
+                    logits = last_pred[k]
+                    target = labels[k][:, t]
+                    max_val = target.max().item()
+                    min_val = target.min().item()
+
+                    logger.debug(f"🧪 {k} logits.shape={logits.shape}, target={target.tolist()}, min_val={min_val}, max_val={max_val}")
+
+                    try:
+                        if max_val >= logits.shape[-1] or min_val < 0:
+                            logger.warning(f"⚠️ Invalid target for {k}: {target.tolist()} (logits.shape={logits.shape}, min={min_val}, max={max_val})")
+                            raise ValueError("Target out of bounds")
+                        loss_items[k] = F.cross_entropy(logits, target)
+                        if not torch.isfinite(loss_items[k]):
+                            raise ValueError("Non-finite loss")
+                    except Exception as e:
+                        logger.error(f"❌ Skipping loss[{k}] due to {str(e)}")
+                        logger.debug(f"  logits = {logits}")
+                        logger.debug(f"  target = {target}")
+                        loss_items[k] = torch.tensor(1e9, device=device)
+
+                '''
+                pred_q_class = last_pred['quantity']
+                target_q_class = quantize_quantity(labels['quantity'][:, t])
+                loss_items['quantity'] = F.cross_entropy(pred_q_class, target_q_class)
+                '''
 
                 for k, v in loss_items.items():
                     logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
 
-                loss = (
-                    loss_weights['type'] * loss_items['type'] +
-                    loss_weights['demand'] * loss_items['demand']+
-                    loss_weights['material'] * loss_items['material'] +
-                    loss_weights['location'] * loss_items['location'] +
-                    loss_weights['start_time'] * loss_items['start_time'] +
-                    loss_weights['end_time'] * loss_items['end_time'] +
-                    loss_weights['request_time'] * loss_items['request_time'] +
-                    loss_weights['commit_time'] * loss_items['commit_time'] +
-                    loss_weights['quantity'] * loss_items['quantity']
-                )
+                loss = sum(loss_weights[k] * loss_items[k] for k in loss_items)
 
                 loss_accum += loss
                 for key in tgt_tokens:
@@ -878,13 +983,12 @@ def _train_stepwise(model=None, depth=None):
         scheduler.step(total_loss)
         if scheduler.num_bad_epochs == 0:
             logger.info(f"📉 Learning rate reduced to {optimizer.param_groups[0]['lr']:.6f}")
-        # Print updated learning rate
+
         for param_group in optimizer.param_groups:
             logger.info(f"📉 Learning rate: {param_group['lr']:.6f}")
 
         logger.info(f"Epoch {epoch+1}/{config['epochs']} - Stepwise Loss: {total_loss:.4f}")
 
-        # Validation loss
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -901,18 +1005,35 @@ def _train_stepwise(model=None, depth=None):
                     pred = model(src, tgt_tokens)
                     last_pred = {k: v[:, -1] for k, v in pred.items()}
 
-                    loss = (
-                        1.0 * F.cross_entropy(last_pred['demand'], labels['demand'][:, t]) +
-                        1.0 * F.cross_entropy(last_pred['material'], labels['material'][:, t]) +
-                        1.0 * F.cross_entropy(last_pred['location'], labels['location'][:, t]) +
-                        1.0 * F.cross_entropy(last_pred['start_time'], labels['start_time'][:, t]) +
-                        1.0 * F.cross_entropy(last_pred['end_time'], labels['end_time'][:, t]) +
-                        1.0 * F.cross_entropy(last_pred['request_time'], labels['request_time'][:, t]) +
-                        1.0 * F.cross_entropy(last_pred['commit_time'], labels['commit_time'][:, t]) +
-                        1.0 * F.mse_loss(last_pred['quantity'], labels['quantity'][:, t])
-                    )
+                    loss_items = defaultdict(float)
+                    for k in ['quantity', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
+                        logits = last_pred[k]
+                        target = labels[k][:, t]
+                        max_val = target.max().item()
+                        min_val = target.min().item()
 
-                    loss_accum += loss
+                        try:
+                            if max_val >= logits.shape[-1] or min_val < 0:
+                                raise ValueError("Target out of bounds")
+                            loss_items[k] = F.cross_entropy(logits, target)
+                            if not torch.isfinite(loss_items[k]):
+                                raise ValueError("Non-finite loss")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Validation loss[{k}] skipped: {str(e)}")
+                            loss_items[k] = torch.tensor(1e9, device=device)
+                    '''
+                    try:
+                        pred_q_class = last_pred['quantity']
+                        target_q_class = quantize_quantity(labels['quantity'][:, t])
+                        loss_items['quantity'] = F.cross_entropy(pred_q_class, target_q_class)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Validation loss[quantity] skipped: {str(e)}")
+                        loss_items['quantity'] = torch.tensor(1e9, device=device)
+                    '''
+
+                    val_loss_step = sum(loss_weights.get(k, 1.0) * loss_items[k] for k in loss_items)
+                    loss_accum += val_loss_step
+
                     for key in tgt_tokens:
                         val = tgt[key][:, t].unsqueeze(1)
                         tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
@@ -923,7 +1044,6 @@ def _train_stepwise(model=None, depth=None):
 
     torch.save(model.state_dict(), config['checkpoint_path'])
     logger.info(f"✅ Model saved to {config['checkpoint_path']}")
-  
 
 # --- Predict Plan ---
 
@@ -998,7 +1118,9 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
             'request_time': torch.tensor([[0]], dtype=torch.long),
             'commit_time': torch.tensor([[0]], dtype=torch.long),
             'method': torch.tensor([[0]], dtype=torch.long),
-            'quantity': torch.tensor([[0.0]], dtype=torch.float),
+
+            'quantity': torch.tensor([[0]], dtype=torch.long),
+
             'id': torch.tensor([[0]], dtype=torch.long),
 
             'parent': torch.tensor([[0]], dtype=torch.long),
@@ -1007,7 +1129,7 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
             'source_location': torch.tensor([[0]], dtype=torch.long),
         }
 
-    def expand_beam(tgt_tokens, new_val):
+    def _expand_beam(tgt_tokens, new_val):
         tgt_copy = {k: v.clone() for k, v in tgt_tokens.items()}
         for key, val in new_val.items():
             if key == 'quantity':
@@ -1018,6 +1140,15 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
             tgt_copy[key] = torch.cat([tgt_copy[key], val_tensor], dim=1)
         return tgt_copy
 
+    def expand_beam(tgt_tokens, new_val):
+        tgt_copy = {k: v.clone() for k, v in tgt_tokens.items()}
+        for key, val in new_val.items():
+            if 'time' in key:
+                val = normalize_time(val)
+            val_tensor = torch.tensor([[val]], dtype=torch.long)
+            tgt_copy[key] = torch.cat([tgt_copy[key], val_tensor], dim=1)
+        return tgt_copy
+    
     def _decode_val(key, out, use_argmax=True):
         val = out[key][0, -1]
         if key == 'type':
@@ -1075,8 +1206,11 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
         new_beams = []
 
         for score, tgt_tokens, plan, next_id in beams:
+            logger.info(f"beam search iteration {next_id}")
+
             with torch.no_grad():
                 out = model(src_tokens, tgt_tokens)
+            
 
             #logger.info(f"out = model(src_tokens, tgt_tokens); out['material'][0].size(0) = {out['material'][0].size(0)}, ")
             #decoded = {}
@@ -1124,8 +1258,11 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
                 r = denormalize_time(decode_val("request_time", out))
                 c = denormalize_time(decode_val("commit_time", out))
                 t = decode_val("type", out)
-                q_raw = decode_val("quantity", out, use_argmax=False)
-                q = denormalize_quantity(float(q_raw[0]) if isinstance(q_raw, list) else float(q_raw))
+
+                #q_raw = decode_val("quantity", out, use_argmax=False)
+                #q = denormalize_quantity(float(q_raw[0]) if isinstance(q_raw, list) else float(q_raw))
+                q = decode_val("quantity", out)
+
                 d = decode_val("demand", out)
 
                 #if t >= 3:
@@ -1142,7 +1279,7 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
                     "end_time": e,
                     "request_time": r,
                     "commit_time": c,
-                    "quantity": round(q, 2),
+                    "quantity": q, #round(q, 2),
                     "type": t
                 }
 
@@ -1252,7 +1389,7 @@ def predict_plan(model, input_example, threshold=0.5):
         if src_tokens[k].dim() == 1:
             src_tokens[k] = src_tokens[k].unsqueeze(0)
     
-    #logger.info(f"src_tokens['type']: {src_tokens['type'][0].tolist()}")
+    #logger.info(f"src_tokens['quantity']: {src_tokens['quantity'][0].tolist()}")
 
     bom = load_bom("data/bom.csv")
     plan = decode_predictions(
@@ -1315,6 +1452,7 @@ def main():
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--train_stepwise", action="store_true")
     parser.add_argument("--predict", action="store_true")
+    parser.add_argument("-d", "--depth", help='Starting from 0')
 
     args = parser.parse_args()
 
@@ -1322,7 +1460,7 @@ def main():
     if args.train_stepwise:
         train_stepwise()
     elif args.train:
-        train()
+        train(args)
     elif args.predict:
         model = SCMTransformerModel(config)
         model.load_state_dict(torch.load(config["checkpoint_path"]))
@@ -1330,15 +1468,14 @@ def main():
         input_example = {
             "input": {
                 "demand": [
-                    {"type": 0, "demand_id": 0, "location_id": 1, "material_id": 88, "request_time": 9,  "time": 8, "start_time": 0, "end_time": 1, "quantity": 11},
+                    {"type": 0, "demand_id": 0, "location_id": 1, "material_id": 89, "request_time": 8, "commit_time": 8, "start_time": 8, "end_time": 8, "quantity": 339},
                 ]
             },
             "tgt": []
         }
 
         aps_example = [
-            {"material_id": 1, "location_id": 0, "start_time": 0, "end_time": 1, "quantity": 14.0},
-            {"material_id": 5, "location_id": 3, "start_time": 1, "end_time": 3, "quantity": 10.0}
+            {"type": 2, "demand_id": 0, "location_id": 1, "material_id": 89, "request_time": 8, "commit_time": 8, "start_time": 5, "end_time": 8, "quantity": 339},
         ]
 
         plan = predict_plan(model, input_example)

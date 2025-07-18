@@ -10,14 +10,14 @@ random.seed(42)
 
 # --- Configuration ---
 NUM_MATERIALS = config['num_materials'] #10
-NUM_LOCATIONS = 4
+NUM_LOCATIONS = config['num_locations']
 MAX_CHILDREN = 3
 MAKE_PROB = 0.8
 PURCHASE_PROB = 0.8
 MOVE_PROB = 0.3
 NUM_DEMANDS = config['num_demands'] #100
 REQUEST_TIME_RANGE = 10
-
+MAX_QUANTITY = config['max_quantity']
 OUTDIR = 'data'
 LOGDIR = os.path.join(OUTDIR, 'logs')
 TOKENIZED = os.path.join(OUTDIR, 'samples')
@@ -150,7 +150,7 @@ for target_depth in range(max_depth + 1):
             'demand_id': range(NUM_DEMANDS),
             'material_id': random.choices(eligible_roots, k=NUM_DEMANDS),
             'location_id': random.choices(range(NUM_LOCATIONS), k=NUM_DEMANDS),
-            'quantity': random.choices(range(1000), k=NUM_DEMANDS),
+            'quantity': random.choices(range(MAX_QUANTITY), k=NUM_DEMANDS),
             'request_time': random.choices(range(0, REQUEST_TIME_RANGE), k=NUM_DEMANDS),
             'commit_time': [None]*NUM_DEMANDS
         })

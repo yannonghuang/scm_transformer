@@ -59,7 +59,7 @@ def get_token_type(t):
 config = {
     'num_token_types': len(token_types), #9,
     'num_demands': 50,
-    'num_locations': 10,
+    'num_locations': 4,
     'num_time_steps': 70,
     'num_materials': 100,
     'num_methods': 600,
@@ -74,7 +74,7 @@ config = {
     'checkpoint_name': 'scm_transformer',
     "max_train_samples": 1000,
     'quantity_scale': 1,  # updated to allow integer binning
-    'max_quantity': 1000 #1e5
+    'max_quantity': 100 #1e5
 }
 
 def dequantize_quantity(q_class):
@@ -540,14 +540,14 @@ def restore_model(model=None):
     depth = -1
     model_path = "models"
     if not os.path.exists(model_path):
-        os.makedirs("model_path", exist_ok=True)
+        os.makedirs(model_path, exist_ok=True)
     else:
         model_files = sorted(Path(model_path).glob("*")) 
         length = len(model_files)
         if length > 0: 
             depth = length - 1
             logger.info(f"Restore model from {model_files[-1]}")          
-            model.load_state_dict(torch.load( model_files[-1]))
+            model.load_state_dict(torch.load(model_files[-1]))
 
     return depth, model
 
@@ -1343,15 +1343,12 @@ def main():
 
     args = parser.parse_args()
 
-
     if args.train_stepwise:
         train_stepwise()
     elif args.train:
         train(args)
     elif args.predict:
-        model = SCMTransformerModel(config)
-        model.load_state_dict(torch.load(config["checkpoint_name"]))
-
+        _, model = restore_model()
         input_example = {
             "input": {
                 "demand": [

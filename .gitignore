@@ -3,3 +3,5 @@ logs/
 scm_model.pt
 scm_transformer.pt
 models/
+__pycache__/
+__pycache__/scm_transformer.cpython-313.pyc

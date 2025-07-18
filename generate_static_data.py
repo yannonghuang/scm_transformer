@@ -4,7 +4,7 @@ import pandas as pd
 import networkx as nx
 import argparse
 
-from scm_transformer import get_token_type, config
+from config import get_token_type, config
 
 random.seed(42)
 

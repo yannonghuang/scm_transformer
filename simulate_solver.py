@@ -3,7 +3,7 @@ import os
 import pandas as pd
 from collections import defaultdict
 
-from scm_transformer import get_token_type
+from config import get_token_type
 
 # --- Loaders ---
 def load_csv(path):

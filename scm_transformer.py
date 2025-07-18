@@ -71,7 +71,7 @@ config = {
     'batch_size': 8,
     'lr': 1e-4,
     'epochs': 5,
-    'checkpoint_path': 'scm_transformer.pt',
+    'checkpoint_name': 'scm_transformer',
     "max_train_samples": 1000,
     'quantity_scale': 1,  # updated to allow integer binning
     'max_quantity': 1000 #1e5
@@ -260,28 +260,28 @@ class SCMTransformerModel(nn.Module):
             last = {k: prev_tokens[k][b][-1].item() for k in prev_tokens}
 
             if last['type'] == get_token_type('demand'): #1:  demand
-                logits_dict['end_time'][b, :, last['commit_time'] + 1:] = MASK_VAL # float('-inf')
+                logits_dict['end_time'][b, :, last['commit_time'] + 1:] = float('-inf')
 
             if last['type'] == get_token_type('move'):  # move
-                logits_dict['location'][b, :, :] = MASK_VAL # float('-inf')
+                logits_dict['location'][b, :, :] = float('-inf')
                 logits_dict['location'][b, :, last['source_location']] = 0.0
             else:
-                logits_dict['location'][b, :, :] = MASK_VAL # float('-inf')
+                logits_dict['location'][b, :, :] = float('-inf')
                 logits_dict['location'][b, :, last['location']] = 0.0
 
-            logits_dict['demand'][b, :, :] = MASK_VAL # float('-inf')
+            logits_dict['demand'][b, :, :] = float('-inf')
             logits_dict['demand'][b, :, last['demand']] = 0.0
 
-            logits_dict['material'][b, :, :] = MASK_VAL # float('-inf')
+            logits_dict['material'][b, :, :] = float('-inf')
             logits_dict['material'][b, :, last['material']] = 0.0
 
-            logits_dict['end_time'][b, :, last['start_time'] + 1:] = MASK_VAL # float('-inf')
+            logits_dict['end_time'][b, :, last['start_time'] + 1:] = float('-inf')
 
             # Enforce quantity equality
             if 'quantity' in logits_dict:
-                #logits_dict['quantity'][b, :] = MASK_VAL # float('-inf')
+                #logits_dict['quantity'][b, :] = float('-inf')
                 #logits_dict['quantity'][b, -1] = last['quantity']
-                logits_dict['quantity'][b, :, :] = MASK_VAL # float('-inf')
+                logits_dict['quantity'][b, :, :] = float('-inf')
                 logits_dict['quantity'][b, :, last['quantity']] = 0.0
 
         return logits_dict
@@ -299,31 +299,31 @@ class SCMTransformerModel(nn.Module):
                 last = {k: prev_tokens[k][b][seq].item() for k in prev_tokens}
 
                 if last['type'] == get_token_type('demand'): #1:  demand
-                    logits_dict['end_time'][b, seq, last['commit_time'] + 1:] = MASK_VAL # float('-inf')
+                    logits_dict['end_time'][b, seq, last['commit_time'] + 1:] = float('-inf')
                 else:
-                    logits_dict['end_time'][b, seq, last['start_time'] + 1:] = MASK_VAL # float('-inf')
+                    logits_dict['end_time'][b, seq, last['start_time'] + 1:] = float('-inf')
 
                 if last['type'] == get_token_type('move'):  # move
-                    logits_dict['location'][b, seq, :] = MASK_VAL # float('-inf')
+                    logits_dict['location'][b, seq, :] = float('-inf')
                     logits_dict['location'][b, seq, last['source_location']] = 0.0
                 else:
-                    logits_dict['location'][b, seq, :] = MASK_VAL # float('-inf')
+                    logits_dict['location'][b, seq, :] = float('-inf')
                     logits_dict['location'][b, seq, last['location']] = 0.0
 
-                logits_dict['demand'][b, seq, :] = MASK_VAL # float('-inf')
+                logits_dict['demand'][b, seq, :] = float('-inf')
                 logits_dict['demand'][b, seq, last['demand']] = 0.0
 
-                logits_dict['material'][b, seq, :] = MASK_VAL # float('-inf')
+                logits_dict['material'][b, seq, :] = float('-inf')
                 logits_dict['material'][b, seq, last['material']] = 0.0
 
                 
 
                 # Enforce quantity equality
                 #if 'quantity' in logits_dict:
-                #    logits_dict['quantity'][b, seq] = MASK_VAL # float('-inf')
+                #    logits_dict['quantity'][b, seq] = float('-inf')
                 #    logits_dict['quantity'][b, seq] = last['quantity']
 
-                logits_dict['quantity'][b, seq, :] = MASK_VAL # float('-inf')
+                logits_dict['quantity'][b, seq, :] = float('-inf')
                 logits_dict['quantity'][b, seq, last['quantity']] = 0.0
 
         # additional constraints
@@ -532,9 +532,36 @@ def encode_tokens(token_list, token_type_id=1):
         #'token_type_id': torch.tensor([token_type_id] * len(token_list), dtype=torch.long)
     }
 
+def restore_model(model=None):
+    if model is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = SCMTransformerModel(config).to(device)
+
+    depth = -1
+    model_path = "models"
+    if not os.path.exists(model_path):
+        os.makedirs("model_path", exist_ok=True)
+    else:
+        model_files = sorted(Path(model_path).glob("*")) 
+        length = len(model_files)
+        if length > 0: 
+            depth = length - 1
+            logger.info(f"Restore model from {model_files[-1]}")          
+            model.load_state_dict(torch.load( model_files[-1]))
+
+    return depth, model
+
+def save_model(model, depth):
+    model_file_name = f"models/{config['checkpoint_name']}_depth_{depth}.pt"
+    torch.save(model.state_dict(), model_file_name)
+    logger.info(f"✅ Model saved to {model_file_name}")
+
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SCMTransformerModel(config).to(device)
+    
+    min_depth, model = restore_model(model)
+    min_depth = min_depth + 1
 
     max_depth = None
     if args.depth:
@@ -543,7 +570,7 @@ def train(args):
     if max_depth is None:
         max_depth = get_max_depth(load_bom_graph())
 
-    for depth in range(1, max_depth + 1):
+    for depth in range(min_depth + 1, max_depth + 1):
         logger.info(f"\n📚 Training on samples with BOM depth <= {depth}")
         train_stepwise(model, depth - 1)
 
@@ -739,7 +766,7 @@ def train_stepwise(model=None, depth=None):
                         if max_val >= logits.shape[-1] or min_val < 0:
                             logger.warning(f"⚠️ Invalid target for {k}: {target.tolist()} (logits.shape={logits.shape}, min={min_val}, max={max_val})")
                             raise ValueError("Target out of bounds")
-                        
+                        '''
                         # Replace MASK_VAL with -100 for ignoring
                         if isinstance(target, torch.Tensor) and (target == MASK_VAL).any():
                             target = target.masked_fill(target == MASK_VAL, -100)
@@ -747,7 +774,7 @@ def train_stepwise(model=None, depth=None):
                         field_loss = None
                         if (logits.max(dim=-1).values > -1e6).any():                        
                             field_loss = compute_loss(logits, target)
-                            
+    
                         if (
                             field_loss is not None 
                             and isinstance(field_loss, torch.Tensor) 
@@ -756,9 +783,14 @@ def train_stepwise(model=None, depth=None):
                             and field_loss.item() < -MASK_VAL
                         ):
                             loss_items[k] = field_loss
+                        '''
 
                         #if logits.max().item() > -1e4:
-                        #    loss_items[k] = F.cross_entropy(logits, target)
+                        if torch.isfinite(logits.max()).item():
+                            field_loss = F.cross_entropy(logits, target)
+                        if field_loss is not None and torch.isfinite(field_loss).item():
+                            loss_items[k] = field_loss
+
                         '''
                         B, T, V = logits.shape
                         logits_flat = logits.view(B * T, V)
@@ -834,7 +866,7 @@ def train_stepwise(model=None, depth=None):
                         try:
                             if max_val >= logits.shape[-1] or min_val < 0:
                                 raise ValueError("Target out of bounds")
-                            
+                            '''
                             # Replace MASK_VAL with -100 for ignoring
                             if isinstance(target, torch.Tensor) and (target == MASK_VAL).any():
                                 target = target.masked_fill(target == MASK_VAL, -100)
@@ -850,9 +882,14 @@ def train_stepwise(model=None, depth=None):
                                     and field_loss.item() < -MASK_VAL
                                 ):
                                 loss_items[k] = field_loss
+                            '''
 
                             #if logits.max().item() > -1e4:
-                            #    loss_items[k] = F.cross_entropy(logits, target)
+                            if torch.isfinite(logits.max()).item():
+                                field_loss = F.cross_entropy(logits, target)
+                            if field_loss is not None and torch.isfinite(field_loss).item():
+                                loss_items[k] = field_loss
+                                
                             '''
                             B, T, V = logits.shape
                             logits_flat = logits.view(B * T, V)
@@ -893,159 +930,7 @@ def train_stepwise(model=None, depth=None):
         model.train()
         logger.info(f"🔍 Validation Loss: {val_loss:.4f}")
 
-    torch.save(model.state_dict(), config['checkpoint_path'])
-    logger.info(f"✅ Model saved to {config['checkpoint_path']}")
-
-def _train_stepwise(model=None, depth=None):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if model is None:
-        model = SCMTransformerModel(config).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=5)
-
-    sample_path = os.path.join('data', 'logs', f'depth_{depth}')
-    if not os.path.exists(sample_path):
-        logger.info(f'sample data {sample_path} does not exist, exit ...')
-        return
-
-    dataset = SCMDataset(sample_path)
-    train_set, val_set = torch.utils.data.random_split(dataset, [int(0.8 * len(dataset)), len(dataset) - int(0.8 * len(dataset))])
-    train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
-
-    def quantize_quantity(q):
-        q_clip = q.clamp(min=0, max=config['max_quantity'])
-        q_scaled = (q_clip / config['quantity_scale']).round().long()
-        return q_scaled
-
-    model.train()
-    for epoch in range(config['epochs']):
-        total_loss = 0.0
-        for src, tgt, labels in train_loader:
-            src = {k: v.to(device) for k, v in src.items()}
-            tgt = {k: v.to(device) for k, v in tgt.items()}
-            labels = {k: v.to(device) for k, v in labels.items()}
-            tgt_len = tgt['material'].shape[1]
-
-            tgt_tokens = {
-                key: tgt[key][:, :1].clone()
-                for key in tgt
-            }
-
-            loss_accum = 0.0
-            for t in range(1, tgt_len):
-                pred = model(src, tgt_tokens)
-                last_pred = {k: v[:, -1] for k, v in pred.items()}
-
-                loss_items = defaultdict(float)
-
-                for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
-                    logits = last_pred[k]
-                    target = labels[k][:, t]
-                    max_val = target.max().item()
-                    min_val = target.min().item()
-
-                    logger.debug(f"🧪 {k} logits.shape={logits.shape}, target={target.tolist()}, min_val={min_val}, max_val={max_val}")
-
-                    try:
-                        if max_val >= logits.shape[-1] or min_val < 0:
-                            logger.warning(f"⚠️ Invalid target for {k}: {target.tolist()} (logits.shape={logits.shape}, min={min_val}, max={max_val})")
-                            raise ValueError("Target out of bounds")
-                        loss_items[k] = F.cross_entropy(logits, target)
-                        if not torch.isfinite(loss_items[k]):
-                            raise ValueError("Non-finite loss")
-                    except Exception as e:
-                        logger.error(f"❌ Skipping loss[{k}] due to {str(e)}")
-                        logger.debug(f"  logits = {logits}")
-                        logger.debug(f"  target = {target}")
-                        loss_items[k] = torch.tensor(1e9, device=device)
-
-                '''
-                pred_q_class = last_pred['quantity']
-                target_q_class = quantize_quantity(labels['quantity'][:, t])
-                loss_items['quantity'] = F.cross_entropy(pred_q_class, target_q_class)
-                '''
-
-                for k, v in loss_items.items():
-                    logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
-
-                loss = sum(loss_weights[k] * loss_items[k] for k in loss_items)
-
-                loss_accum += loss
-                for key in tgt_tokens:
-                    val = tgt[key][:, t].unsqueeze(1)
-                    tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
-
-            optimizer.zero_grad()
-            loss_accum.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            total_loss += loss_accum.item()
-
-        scheduler.step(total_loss)
-        if scheduler.num_bad_epochs == 0:
-            logger.info(f"📉 Learning rate reduced to {optimizer.param_groups[0]['lr']:.6f}")
-
-        for param_group in optimizer.param_groups:
-            logger.info(f"📉 Learning rate: {param_group['lr']:.6f}")
-
-        logger.info(f"Epoch {epoch+1}/{config['epochs']} - Stepwise Loss: {total_loss:.4f}")
-
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for src, tgt, labels in val_loader:
-                src = {k: v.to(device) for k, v in src.items()}
-                tgt = {k: v.to(device) for k, v in tgt.items()}
-                labels = {k: v.to(device) for k, v in labels.items()}
-                tgt_len = tgt['material'].shape[1]
-
-                tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
-
-                loss_accum = 0.0
-                for t in range(tgt_len):
-                    pred = model(src, tgt_tokens)
-                    last_pred = {k: v[:, -1] for k, v in pred.items()}
-
-                    loss_items = defaultdict(float)
-                    for k in ['quantity', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
-                        logits = last_pred[k]
-                        target = labels[k][:, t]
-                        max_val = target.max().item()
-                        min_val = target.min().item()
-
-                        try:
-                            if max_val >= logits.shape[-1] or min_val < 0:
-                                raise ValueError("Target out of bounds")
-                            loss_items[k] = F.cross_entropy(logits, target)
-                            if not torch.isfinite(loss_items[k]):
-                                raise ValueError("Non-finite loss")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Validation loss[{k}] skipped: {str(e)}")
-                            loss_items[k] = torch.tensor(1e9, device=device)
-                    '''
-                    try:
-                        pred_q_class = last_pred['quantity']
-                        target_q_class = quantize_quantity(labels['quantity'][:, t])
-                        loss_items['quantity'] = F.cross_entropy(pred_q_class, target_q_class)
-                    except Exception as e:
-                        logger.warning(f"⚠️ Validation loss[quantity] skipped: {str(e)}")
-                        loss_items['quantity'] = torch.tensor(1e9, device=device)
-                    '''
-
-                    val_loss_step = sum(loss_weights.get(k, 1.0) * loss_items[k] for k in loss_items)
-                    loss_accum += val_loss_step
-
-                    for key in tgt_tokens:
-                        val = tgt[key][:, t].unsqueeze(1)
-                        tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
-
-                val_loss += loss_accum.item()
-        model.train()
-        logger.info(f"🔍 Validation Loss: {val_loss:.4f}")
-
-    torch.save(model.state_dict(), config['checkpoint_path'])
-    logger.info(f"✅ Model saved to {config['checkpoint_path']}")
+    save_model(model, depth)
 
 # --- Predict Plan ---
 
@@ -1465,7 +1350,7 @@ def main():
         train(args)
     elif args.predict:
         model = SCMTransformerModel(config)
-        model.load_state_dict(torch.load(config["checkpoint_path"]))
+        model.load_state_dict(torch.load(config["checkpoint_name"]))
 
         input_example = {
             "input": {

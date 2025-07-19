@@ -78,7 +78,7 @@ class SCMDataset(Dataset):
             "type": torch.zeros((len(df)), dtype=torch.long),
             "location": torch.tensor(df["location_id"].values, dtype=torch.long),
             "material": torch.tensor(df["material_id"].values, dtype=torch.long),
-            "time": torch.tensor(df["request_time"].values, dtype=torch.long),
+            #"time": torch.tensor(df["request_time"].values, dtype=torch.long),
 
             #"quantity": torch.tensor(df["quantity"].values, dtype=torch.float),
             "quantity": torch.tensor(df["quantity"].values, dtype=torch.long),
@@ -113,7 +113,7 @@ class SCMDataset(Dataset):
             "source_location": torch.tensor(df["source_location_id"].values, dtype=torch.long), #.unsqueeze(0),
 
             "material": torch.tensor(df["material_id"].values, dtype=torch.long), #.unsqueeze(0),
-            "time": torch.tensor(df["start_time"].values, dtype=torch.long), #.unsqueeze(0),
+            #"time": torch.tensor(df["start_time"].values, dtype=torch.long), #.unsqueeze(0),
 
             "request_time": torch.tensor(df["request_time"].values, dtype=torch.long),
             "commit_time": torch.tensor(df["commit_time"].values, dtype=torch.long),
@@ -216,7 +216,7 @@ def encode_tokens(token_list, token_type_id=1):
         'source_location': to_tensor("location"),
 
         'material': to_tensor("material"),
-        'time': to_tensor("time"),
+        #'time': to_tensor("time"),
 
         'start_time': to_tensor("start_time"),
         'end_time': to_tensor("end_time"),

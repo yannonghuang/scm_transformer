@@ -57,7 +57,7 @@ class SCMEmbedding(nn.Module):
         e_type = self.type_emb(tokens['type'])
         e_loc = self.loc_emb(tokens['location'])
         e_src_loc = self.loc_emb(tokens['source_location'])
-        e_time = self.time_emb(tokens['time'])
+        #e_time = self.time_emb(tokens['time'])
         e_start = self.time_emb(tokens['start_time'])
         e_end = self.time_emb(tokens['end_time'])
         e_req = self.time_emb(tokens['request_time'])
@@ -81,7 +81,7 @@ class SCMEmbedding(nn.Module):
         is_bom = (tokens['type'] == get_token_type('bom')).unsqueeze(-1).float()
 
         e_combined = (
-            e_type + e_loc + e_src_loc + e_time + e_start + e_end +
+            e_type + e_loc + e_src_loc + e_start + e_end + # e_time + 
             e_req + e_commit + e_demand + e_mat + e_method + e_qty
         )
         e_bom = e_parent + e_child
@@ -377,10 +377,16 @@ def restore_model(model=None):
     if not os.path.exists(model_path):
         os.makedirs(model_path, exist_ok=True)
     else:
-        model_files = sorted(Path(model_path).glob("*")) 
+        model_files = sorted(Path(model_path).glob("*"), key=os.path.getmtime) 
+        
         length = len(model_files)
         if length > 0: 
-            depth = length - 1
+            last_depth = ((str(model_files[-1])).split('.')[0]).split('_')[-1]
+            #max_depth = max([((str(p)).split('.')[0]).split('_')[-1] for p in model_files])
+            logger.info(f"last depth = {last_depth}")
+
+            #depth = length - 1
+            depth = int(last_depth)
             logger.info(f"Restore model from {model_files[-1]}")          
             model.load_state_dict(torch.load(model_files[-1]))
 

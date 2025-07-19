@@ -37,12 +37,14 @@ def load_bom(path="data/bom.csv") -> dict[int, set[int]]:
         bom_map = bom
     return bom_map
 
-def update_config_from_static_data(config, logs_root="data/logs"):
+def update_config_from_static_data(config, samples_root="data/samples"):
     max_material = -1
     max_location = -1
+    max_method = -1
+    max_time = -1
 
     #for sample_dir in Path(logs_root).glob("sample_*"):
-    for sample_dir in Path(logs_root).glob("depth_*/sample_*"):
+    for sample_dir in Path(samples_root).glob("depth_*/sample_*"):
         for file_name in ["demands.csv", "combined_output.csv"]:
             fpath = sample_dir / file_name
             if fpath.exists():
@@ -51,10 +53,27 @@ def update_config_from_static_data(config, logs_root="data/logs"):
                     max_material = max(max_material, df["material_id"].max())
                 if "location_id" in df.columns:
                     max_location = max(max_location, df["location_id"].max())
+                if "start_time" in df.columns:
+                    max_time = max(max_time, df["start_time"].max())
+                if "end_time" in df.columns:
+                    max_time = max(max_time, df["end_time"].max())
+                if "request_time" in df.columns:
+                    max_time = max(max_time, df["request_time"].max())
+                if "commit_time" in df.columns:
+                    max_time = max(max_time, df["commit_time"].max())
+
+    fpath = Path("data/method.csv")
+    if fpath.exists():
+        df = pd.read_csv(fpath)
+        if "id" in df.columns:
+            max_method = df["id"].max()
 
     config['num_materials'] = max_material + 1
     config['num_locations'] = max_location + 1
-    logger.info(f"🔧 Config updated: {config['num_materials']} materials, {config['num_locations']} locations")
+    config['num_methods'] = max_method + 1
+    config['num_time_steps'] = int(max_time + 1)
+
+    logger.info(f"🔧 Config updated: {config['num_materials']} materials, {config['num_locations']} locations, {config['num_methods']} methods, {config['num_time_steps']} time steps")
 
 def get_max_depth(G):
     """Safely compute max depth of a DAG from leaves upwards."""

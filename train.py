@@ -26,8 +26,7 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SCMTransformerModel(config).to(device)
     
-    min_depth, model = restore_model(model)
-    min_depth = min_depth + 1
+    depth, model = restore_model(model)
 
     max_depth = None
     if args.depth:
@@ -36,9 +35,11 @@ def train(args):
     if max_depth is None:
         max_depth = get_max_depth(load_bom_graph())
 
-    for depth in range(min_depth + 1, max_depth + 1):
-        logger.info(f"\n📚 Training on samples with BOM depth <= {depth}")
-        train_stepwise(model, depth - 1)
+    for d in range(max_depth + 1):
+        depth += 1
+        next_depth = depth % (max_depth + 1)
+        logger.info(f"\n📚 Training on samples with BOM depth <= {next_depth}")
+        train_stepwise(model, next_depth)
 
 
 loss_weights = {'type': 1.0, 
@@ -85,7 +86,7 @@ def train_stepwise(model=None, depth=None):
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=5)
 
-    sample_path = os.path.join('data', 'logs', f'depth_{depth}')
+    sample_path = os.path.join('data', 'samples', f'depth_{depth}')
     if not os.path.exists(sample_path):
         logger.info(f'sample data {sample_path} does not exist, exit ...')
         return

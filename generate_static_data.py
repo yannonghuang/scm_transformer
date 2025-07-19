@@ -16,14 +16,13 @@ MAKE_PROB = 0.8
 PURCHASE_PROB = 0.8
 MOVE_PROB = 0.3
 NUM_DEMANDS = config['num_demands'] #100
-REQUEST_TIME_RANGE = 10
+REQUEST_TIME_RANGE = config['request_time_range'] #10
 MAX_QUANTITY = config['max_quantity']
 OUTDIR = 'data'
-LOGDIR = os.path.join(OUTDIR, 'logs')
-TOKENIZED = os.path.join(OUTDIR, 'samples')
+SAMPLE_DIR = os.path.join(OUTDIR, 'samples')
 os.makedirs(OUTDIR, exist_ok=True)
-os.makedirs(LOGDIR, exist_ok=True)
-os.makedirs(TOKENIZED, exist_ok=True)
+os.makedirs(SAMPLE_DIR, exist_ok=True)
+
 
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser()
@@ -154,8 +153,10 @@ for target_depth in range(max_depth + 1):
             'request_time': random.choices(range(0, REQUEST_TIME_RANGE), k=NUM_DEMANDS),
             'commit_time': [None]*NUM_DEMANDS
         })
+        assert (demands['request_time'] < REQUEST_TIME_RANGE).all(), "request_time out of range"
+
         #sample_dir = f"{LOGDIR}/sample_{sample_count}/depth_{target_depth}"
-        sample_dir = f"{LOGDIR}/depth_{target_depth}/sample_{i}"
+        sample_dir = f"{SAMPLE_DIR}/depth_{target_depth}/sample_{i}"
         demand_path = f"{sample_dir}/demands.csv"
         os.makedirs(sample_dir, exist_ok=True)
         demands.to_csv(demand_path, index=False)

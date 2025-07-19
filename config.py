@@ -58,10 +58,11 @@ def get_token_type(t):
 
 config = {
     'num_token_types': len(token_types), #9,
-    'num_demands': 50,
+    'num_demands': 10,
     'num_locations': 4,
-    'num_time_steps': 70,
-    'num_materials': 100,
+    'num_time_steps': 30,
+    'request_time_range': 10,
+    'num_materials': 70,
     'num_methods': 600,
     'd_model': 128,
     'n_heads': 4,
@@ -70,7 +71,7 @@ config = {
     'dropout': 0.1,
     'batch_size': 8,
     'lr': 1e-4,
-    'epochs': 5,
+    'epochs': 1,
     'checkpoint_name': 'scm_transformer',
     "max_train_samples": 1000,
     'quantity_scale': 1,  # updated to allow integer binning

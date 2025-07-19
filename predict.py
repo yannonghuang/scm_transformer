@@ -46,7 +46,7 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
             'type': torch.tensor([[0]], dtype=torch.long),
             'location': torch.tensor([[0]], dtype=torch.long),
             'material': torch.tensor([[0]], dtype=torch.long),
-            'time': torch.tensor([[0]], dtype=torch.long),
+            #'time': torch.tensor([[0]], dtype=torch.long),
             'start_time': torch.tensor([[0]], dtype=torch.long),
             'end_time': torch.tensor([[0]], dtype=torch.long),
             'request_time': torch.tensor([[0]], dtype=torch.long),
@@ -77,8 +77,8 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
     def expand_beam(tgt_tokens, new_val):
         tgt_copy = {k: v.clone() for k, v in tgt_tokens.items()}
         for key, val in new_val.items():
-            if 'time' in key:
-                val = normalize_time(val)
+            #if 'time' in key:
+            #    val = normalize_time(val)
             val_tensor = torch.tensor([[val]], dtype=torch.long)
             tgt_copy[key] = torch.cat([tgt_copy[key], val_tensor], dim=1)
         return tgt_copy
@@ -223,7 +223,7 @@ def decode_predictions(model, src_tokens, max_steps=50, threshold=0.5, beam_widt
                 #    continue
 
                 new_val = {
-                    'demand': d, 'type': t, 'location': l, 'material': m, 'time': s,
+                    'demand': d, 'type': t, 'location': l, 'material': m, #'time': s,
                     'quantity': q, 'id': next_id,
                     'start_time': s, 'end_time': e,
                     'request_time': r, 'commit_time': c

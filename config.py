@@ -50,7 +50,8 @@ token_types = [
     'material',
     'location',
     'method',
-    'bom'
+    'bom',
+    'eod'
 ]
 
 def get_token_type(t):

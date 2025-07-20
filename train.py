@@ -111,7 +111,8 @@ def train_stepwise(model=None, depth=None):
             }
 
             loss_accum = 0.0
-            for t in range(1, tgt_len):
+            #for t in range(1, tgt_len):
+            for t in range(tgt_len):
                 pred = model(src, tgt_tokens)
                 last_pred = {k: v[:, -1] for k, v in pred.items()}
 

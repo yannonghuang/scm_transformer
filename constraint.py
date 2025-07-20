@@ -220,3 +220,49 @@ def _apply_field_constraints(self, logits_dict, prev_tokens): # this one works
 
     return logits_dict
 
+def apply_demand_constraints(logits_dict, src_tokens, prev_tokens):
+    B, T = prev_tokens['type'].shape[:2]
+    demand_type = get_token_type('demand')
+    eod_type = get_token_type('eod')  # End-of-demand token
+
+    for b in range(B):
+        # Extract ordered demand_ids from src
+        src_demands = [src_tokens['demand'][b][i].item()
+                       for i in range(src_tokens['type'].shape[1])
+                       if src_tokens['type'][b][i].item() == demand_type]
+        if not src_demands:
+            continue
+
+        # Get demand_ids already generated
+        prev_demand_ids = [
+            prev_tokens['demand'][b][t].item()
+            for t in range(T)
+            if prev_tokens['type'][b][t].item() == demand_type
+        ]
+
+        unmet_demand_id = next(
+            (d for d in src_demands if d not in prev_demand_ids),
+            None
+        )
+
+        for t in range(T):
+            if unmet_demand_id is None:
+                # No more demands should be predicted
+                logits_dict['type'][b, t, demand_type] = float('-inf')
+                continue
+
+            is_first = (t == 0)
+            last_token_type = prev_tokens['type'][b][t - 1].item() if t > 0 else None
+            is_after_eod = (last_token_type == eod_type)
+
+            if is_first or is_after_eod:
+                # Allow next demand only at the start or after EOD
+                logits_dict['type'][b, t, :] = float('-inf')
+                logits_dict['type'][b, t, demand_type] = 0
+                logits_dict['demand'][b, t, :] = float('-inf')
+                logits_dict['demand'][b, t, unmet_demand_id] = 0
+            else:
+                # Forbid demand mid-plan
+                logits_dict['type'][b, t, demand_type] = float('-inf')
+
+    return logits_dict

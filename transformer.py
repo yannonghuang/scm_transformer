@@ -16,7 +16,7 @@ from collections import defaultdict
 
 from config import logger, config, get_token_type
 from utils import load_bom, load_bom_parent, get_method_lead_time
-from constraint import apply_field_constraints, apply_bom_mask
+from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints
 
 # --- Embedding Module (Updated) ---
 class SCMEmbedding(nn.Module):
@@ -184,6 +184,8 @@ class SCMTransformerModel(nn.Module):
         if tgt_tokens is not None:
             output_logits = apply_field_constraints(output_logits, tgt_tokens)
 
+        output_logits = apply_demand_constraints(output_logits, src_tokens, tgt_tokens)
+        
         def decode_val(key, out, use_argmax=True):
             val = out[key][0, -1]
             if key == 'type':

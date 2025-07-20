@@ -121,7 +121,7 @@ def main():
         rows.append({'type': get_token_type('demand'), **solved_d})
         for wo in wos:
             rows.append({'type': 'workorder', **wo})
-
+        rows.append({'type': get_token_type('eod'), 'demand_id': d['demand_id']})
     pd.DataFrame(rows).to_csv(os.path.join(args.output, 'combined_output.csv'), index=False)
     print("✅ Simulation complete. Outputs saved to:", args.output)
 

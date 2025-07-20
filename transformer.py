@@ -15,7 +15,8 @@ import csv
 from collections import defaultdict
 
 from config import logger, config, get_token_type
-from utils import load_bom
+from utils import load_bom, load_bom_parent, get_method_lead_time
+from constraint import apply_field_constraints, apply_bom_mask
 
 # --- Embedding Module (Updated) ---
 class SCMEmbedding(nn.Module):
@@ -62,6 +63,7 @@ class SCMEmbedding(nn.Module):
         e_end = self.time_emb(tokens['end_time'])
         e_req = self.time_emb(tokens['request_time'])
         e_commit = self.time_emb(tokens['commit_time'])
+        e_lead = self.time_emb(tokens['lead_time'])
 
         e_demand = self.demand_emb(tokens['demand'])
         e_mat = self.mat_emb(tokens['material'])
@@ -82,7 +84,7 @@ class SCMEmbedding(nn.Module):
 
         e_combined = (
             e_type + e_loc + e_src_loc + e_start + e_end + # e_time + 
-            e_req + e_commit + e_demand + e_mat + e_method + e_qty
+            e_req + e_commit + e_demand + e_mat + e_method + e_qty + e_lead
         )
         e_bom = e_parent + e_child
 
@@ -128,6 +130,7 @@ class SCMTransformerModel(nn.Module):
         self.end_time_out = nn.Linear(d_model, config['num_time_steps'])
         self.request_time_out = nn.Linear(d_model, config['num_time_steps'])
         self.commit_time_out = nn.Linear(d_model, config['num_time_steps'])
+        self.lead_time_out = nn.Linear(d_model, config['num_time_steps'])
 
         #self.quantity_out = nn.Linear(d_model, 1)
         self.method_out = nn.Linear(d_model, config['num_methods'])
@@ -138,135 +141,6 @@ class SCMTransformerModel(nn.Module):
         #self.ref_id_out = nn.Linear(d_model, 64)  # Assume 64 is max number of ref_ids
         #self.depends_on_out = nn.Linear(d_model, 64)  # Same assumption
 
-    def apply_bom_mask(self, logits, src_tokens, tgt_tokens):
-        from collections import defaultdict
-
-        #child_map = defaultdict(set)
-        #for parent, child in bom_edges:
-        #    child_map[parent].add(child)
-        child_map = load_bom()
-        batch_size = logits.size(0)
-        allowed_mask = torch.full_like(logits, float('-inf'))
-
-        for b in range(batch_size):
-            allowed = set()
-            for i, token_type in enumerate(src_tokens['type'][b]):
-                if token_type == get_token_type('demand'):  # Only consider demand tokens
-                    allowed.add(src_tokens['material'][b][i].item())
-            if tgt_tokens is not None:
-                for i, token_type in enumerate(tgt_tokens['type'][b]):
-                    mat = tgt_tokens['material'][b][i].item()
-                    if token_type == get_token_type('make'):  # make
-                        allowed.update(child_map.get(mat, []))
-                    if token_type == get_token_type('purchase') or token_type == get_token_type('move') or token_type == get_token_type('demand'):
-                        allowed.add(mat)
-
-            if not allowed:
-                allowed = {0}  # fallback
-
-            for mat_id in allowed:
-                if mat_id < logits.shape[-1]:
-                    allowed_mask[b, :, mat_id] = 0.0
-
-        return logits + allowed_mask
- 
-    def apply_field_constraints(self, logits_dict, prev_tokens):
-        MASK_VAL = -1e9  # safer alternative to float('-inf')
-
-        batch_size = prev_tokens['type'].size(0)
-
-        for b in range(batch_size):
-            last = {k: prev_tokens[k][b][-1].item() for k in prev_tokens}
-
-            if last['type'] == get_token_type('demand'): #1:  demand
-                logits_dict['end_time'][b, :, last['commit_time'] + 1:] = float('-inf')
-
-            if last['type'] == get_token_type('move'):  # move
-                logits_dict['location'][b, :, :] = float('-inf')
-                logits_dict['location'][b, :, last['source_location']] = 0.0
-            else:
-                logits_dict['location'][b, :, :] = float('-inf')
-                logits_dict['location'][b, :, last['location']] = 0.0
-
-            logits_dict['demand'][b, :, :] = float('-inf')
-            logits_dict['demand'][b, :, last['demand']] = 0.0
-
-            logits_dict['material'][b, :, :] = float('-inf')
-            logits_dict['material'][b, :, last['material']] = 0.0
-
-            logits_dict['end_time'][b, :, last['start_time'] + 1:] = float('-inf')
-
-            # Enforce quantity equality
-            if 'quantity' in logits_dict:
-                #logits_dict['quantity'][b, :] = float('-inf')
-                #logits_dict['quantity'][b, -1] = last['quantity']
-                logits_dict['quantity'][b, :, :] = float('-inf')
-                logits_dict['quantity'][b, :, last['quantity']] = 0.0
-
-        return logits_dict
-
-    def _apply_field_constraints(self, logits_dict, prev_tokens):
-        MASK_VAL = -1e9  # safer alternative to float('-inf')
-
-        batch_size = prev_tokens['type'].size(0)
-
-        for b in range(batch_size):
-            #seq_size = prev_tokens['type'][b].size(0)
-            seq_size = prev_tokens['type'].size(1)
-            for seq in range(seq_size):
-
-                last = {k: prev_tokens[k][b][seq].item() for k in prev_tokens}
-
-                if last['type'] == get_token_type('demand'): #1:  demand
-                    logits_dict['end_time'][b, seq, last['commit_time'] + 1:] = float('-inf')
-                else:
-                    logits_dict['end_time'][b, seq, last['start_time'] + 1:] = float('-inf')
-
-                if last['type'] == get_token_type('move'):  # move
-                    logits_dict['location'][b, seq, :] = float('-inf')
-                    logits_dict['location'][b, seq, last['source_location']] = 0.0
-                else:
-                    logits_dict['location'][b, seq, :] = float('-inf')
-                    logits_dict['location'][b, seq, last['location']] = 0.0
-
-                logits_dict['demand'][b, seq, :] = float('-inf')
-                logits_dict['demand'][b, seq, last['demand']] = 0.0
-
-                logits_dict['material'][b, seq, :] = float('-inf')
-                logits_dict['material'][b, seq, last['material']] = 0.0
-
-                
-
-                # Enforce quantity equality
-                #if 'quantity' in logits_dict:
-                #    logits_dict['quantity'][b, seq] = float('-inf')
-                #    logits_dict['quantity'][b, seq] = last['quantity']
-
-                logits_dict['quantity'][b, seq, :] = float('-inf')
-                logits_dict['quantity'][b, seq, last['quantity']] = 0.0
-
-        # additional constraints
-        
-        next_type = logits_dict['type'].argmax(dim=-1)
-        demand_type = get_token_type('demand')
-        make_type = get_token_type('make')
-        purchase_type = get_token_type('purchase')
-        move_type = get_token_type('move')
-
-        for b in range(next_type.size(0)):
-                for t in range(next_type.size(1)):
-                    t_type = next_type[b, t].item()
-                    if t_type == demand_type:
-                        shared_time = logits_dict['commit_time'][b, t]
-                        logits_dict['start_time'][b, t] = shared_time
-                        logits_dict['end_time'][b, t] = shared_time
-                    elif t_type in (make_type, purchase_type, move_type):
-                        shared_time = logits_dict['end_time'][b, t]
-                        logits_dict['request_time'][b, t] = shared_time
-                        logits_dict['commit_time'][b, t] = shared_time
-        
-        return logits_dict
-       
     def forward(self, src_tokens, tgt_tokens, bom_edges=None):
         assert (src_tokens['demand'] < config['num_demands']).all(), "demand_id out of range"
         assert (src_tokens['material'] < config['num_materials']).all(), "material_id out of range"
@@ -279,7 +153,7 @@ class SCMTransformerModel(nn.Module):
 
         material_logits = self.material_out(decoded)
         #if bom_edges is not None:
-        material_logits = self.apply_bom_mask(material_logits, src_tokens, tgt_tokens)
+        material_logits = apply_bom_mask(material_logits, src_tokens, tgt_tokens)
 
         quantity_pred = self.quantity_out(decoded).squeeze(-1)
         quantity_pred = torch.clamp(quantity_pred, min=0.0, max=1e6)  # Clamp prediction for stability
@@ -295,7 +169,8 @@ class SCMTransformerModel(nn.Module):
             'start_time': self.start_time_out(decoded),
             'end_time': self.end_time_out(decoded),
             'request_time': self.request_time_out(decoded),
-            'commit_time': self.commit_time_out(decoded),            
+            'commit_time': self.commit_time_out(decoded),
+            'lead_time': self.lead_time_out(decoded),            
 
             'quantity': self.quantity_out(decoded),
             #'quantity': quantity_pred, #self.quantity_out(decoded).squeeze(-1),
@@ -307,7 +182,7 @@ class SCMTransformerModel(nn.Module):
             #'child': material_logits
         }
         if tgt_tokens is not None:
-            output_logits = self.apply_field_constraints(output_logits, tgt_tokens)
+            output_logits = apply_field_constraints(output_logits, tgt_tokens)
 
         def decode_val(key, out, use_argmax=True):
             val = out[key][0, -1]
@@ -365,7 +240,7 @@ class SCMTransformerModel(nn.Module):
                 logger.debug(f"✔ Constraint: start_time >= end_time? {decoded['start_time'] >= prev['end_time']}")
 
         return output_logits
-
+    
 
 def restore_model(model=None):
     if model is None:
@@ -396,4 +271,5 @@ def save_model(model, depth):
     model_file_name = f"models/{config['checkpoint_name']}_depth_{depth}.pt"
     torch.save(model.state_dict(), model_file_name)
     logger.info(f"✅ Model saved to {model_file_name}")
+
 

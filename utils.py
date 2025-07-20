@@ -37,6 +37,35 @@ def load_bom(path="data/bom.csv") -> dict[int, set[int]]:
         bom_map = bom
     return bom_map
 
+bom_parent_map = defaultdict(set)
+def load_bom_parent(path="data/bom.csv") -> dict[int, set[int]]:
+    global bom_parent_map
+    if bom_parent_map is None or len(bom_parent_map) == 0 :
+        bom = defaultdict(set)
+        with open(path, newline="") as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                parent = int(row["parent"])
+                child = int(row["child"])
+                bom[child].add(parent)
+        #return dict(bom)
+        bom_parent_map = bom
+    return bom_parent_map
+
+def load_csv(path):
+    return pd.read_csv(path)
+
+methods = defaultdict(list)
+def get_method_lead_time(key, path="data/method.csv"):
+    global methods
+    if methods is None or len(methods) == 0 :
+        for _, row in load_csv(path).iterrows():
+            k = (row['material_id'], row['location_id'], row['type'])
+            methods[k].append(row)
+    if key not in methods:
+        return None
+    return methods[key][0]['lead_time']
+
 def update_config_from_static_data(config, samples_root="data/samples"):
     max_material = -1
     max_location = -1

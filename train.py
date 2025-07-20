@@ -45,7 +45,7 @@ def train(args):
 loss_weights = {'type': 1.0, 
     'demand': 1.0, 'material': 1.0, 'location': 1.0,
     'start_time': 1.0, 'end_time': 1.0, 'request_time': 1.0,
-    'commit_time': 1.0, 'quantity': 1.0
+    'commit_time': 1.0, 'quantity': 1.0, 'lead_time': 1.0
 }
 
 
@@ -117,7 +117,7 @@ def train_stepwise(model=None, depth=None):
 
                 loss_items = defaultdict(float)
 
-                for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
+                for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time']:
                     logits = last_pred[k]
                     target = labels[k][:, t]
                     max_val = target.max().item()
@@ -220,7 +220,7 @@ def train_stepwise(model=None, depth=None):
                     last_pred = {k: v[:, -1] for k, v in pred.items()}
 
                     loss_items = defaultdict(float)
-                    for k in ['quantity', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time']:
+                    for k in ['quantity', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time']:
                         logits = last_pred[k]
                         target = labels[k][:, t]
                         max_val = target.max().item()

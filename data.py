@@ -40,6 +40,7 @@ def generate_candidate_tokens(input_dict):
             "end_time": 0,
             "request_time": d["request_time"],
             "commit_time": 0,
+            "lead_time": 0,
 
             "method": 0,
             "quantity": d["quantity"],
@@ -87,6 +88,7 @@ class SCMDataset(Dataset):
             "end_time": torch.zeros((len(df)), dtype=torch.long),
             "request_time": torch.tensor(df["request_time"].values, dtype=torch.long),
             "commit_time": torch.zeros((len(df)), dtype=torch.long),
+            "lead_time": torch.zeros((len(df)), dtype=torch.long),
 
             "parent": torch.zeros((len(df)), dtype=torch.long),
             "child": torch.zeros((len(df)), dtype=torch.long),
@@ -120,6 +122,7 @@ class SCMDataset(Dataset):
 
             "start_time": torch.tensor(df["start_time"].values, dtype=torch.long), #.unsqueeze(0),
             "end_time": torch.tensor(df["end_time"].values, dtype=torch.long), #.unsqueeze(0),
+            "lead_time": torch.tensor(df["lead_time"].values, dtype=torch.long), #.unsqueeze(0),
 
             #"method_id": torch.zeros((1, len(df)), dtype=torch.long),
             "method": torch.zeros((len(df)), dtype=torch.long),
@@ -166,8 +169,8 @@ def generate_static_tokens():
             'material': int(row['material_id']),
             'location': int(row['location_id']),
             #'source_location': int(row['source_location_id']),
-            'source_location': int(row['source_location_id']) if pd.notna(row['source_location_id']) else 0
-
+            'source_location': int(row['source_location_id']) if pd.notna(row['source_location_id']) else 0,
+            'lead_time': int(row['lead_time']),
             #'method_type': int(row['method_type'])
         })
 
@@ -231,6 +234,8 @@ def encode_tokens(token_list, token_type_id=1):
         'parent': to_tensor("parent"),
         'child': to_tensor("child"),
         #'token_type_id': torch.tensor([token_type_id] * len(token_list), dtype=torch.long)
+
+        'lead_time': to_tensor("lead_time"),
     }
 
 # --- Updated Combined Input Token Generator ---

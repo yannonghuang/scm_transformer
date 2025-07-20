@@ -46,6 +46,7 @@ def create_work_order(demand_id, method, start_time, end_time, quantity):
         'quantity': quantity,
         'request_time': end_time,
         'commit_time': end_time,
+        'lead_time': method.get('lead_time', None),
     }
 
 # --- Recursive Solver ---

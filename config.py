@@ -57,6 +57,9 @@ token_types = [
 def get_token_type(t):
     return token_types.index(t)
 
+def get_token_label(id):
+    return token_types[id]
+
 config = {
     'num_token_types': len(token_types), #9,
     'num_demands': 10,
@@ -72,7 +75,7 @@ config = {
     'dropout': 0.1,
     'batch_size': 8,
     'lr': 1e-4,
-    'epochs': 1,
+    'epochs': 20,
     'checkpoint_name': 'scm_transformer',
     "max_train_samples": 1000,
     'quantity_scale': 1,  # updated to allow integer binning

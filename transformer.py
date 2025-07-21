@@ -67,7 +67,7 @@ class SCMEmbedding(nn.Module):
 
         e_demand = self.demand_emb(tokens['demand'])
         e_mat = self.mat_emb(tokens['material'])
-        e_method = self.method_emb(tokens['method'])
+        #e_method = self.method_emb(tokens['method'])
 
 
         # Convert float quantity to bin index
@@ -75,16 +75,18 @@ class SCMEmbedding(nn.Module):
         e_qty = self.quantity_emb(tokens['quantity'])
         #e_qty = self.quantity_proj(tokens['quantity'].unsqueeze(-1).float())
 
-        # BOM-specific
-        e_parent = self.mat_emb(tokens['parent'])
-        e_child = self.mat_emb(tokens['child'])
-
         # Mask: 1 if type is 'bom', 0 otherwise
         is_bom = (tokens['type'] == get_token_type('bom')).unsqueeze(-1).float()
 
+        # BOM-specific
+        # Safe default values for parent/child for non-BOM tokens (e.g., zeros)
+        zero_embed = torch.zeros_like(e_mat)        
+        e_parent = self.mat_emb(tokens['parent']) if 'parent' in tokens else zero_embed
+        e_child = self.mat_emb(tokens['child']) if 'child' in tokens else zero_embed
+
         e_combined = (
             e_type + e_loc + e_src_loc + e_start + e_end + # e_time + 
-            e_req + e_commit + e_demand + e_mat + e_method + e_qty + e_lead
+            e_req + e_commit + e_demand + e_mat + e_qty + e_lead #+ e_method
         )
         e_bom = e_parent + e_child
 

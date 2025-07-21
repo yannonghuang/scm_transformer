@@ -15,7 +15,7 @@ import csv
 from collections import defaultdict
 
 from config import logger, config, get_token_type
-from utils import load_bom, load_bom_parent, get_method_lead_time
+from utils import load_bom, load_bom_parent, get_method, get_method_lead_time
 
 
 def apply_bom_mask(logits, src_tokens, tgt_tokens):
@@ -124,14 +124,19 @@ def apply_field_constraints(logits_dict, prev_tokens):
             location = token["location"]
 
             method_key = (material, location, op_type)
-            lead_time = get_method_lead_time(method_key)
+            #lead_time = get_method_lead_time(method_key)
+            method = get_method(method_key)
 
-            if lead_time is None:
+            #if lead_time is None:
+            if not method:
                 # Invalid method: mask entire token
                 for field in logits_dict:
                     logits_dict[field][b, t, :] = float('-inf')
                 continue
 
+            lead_time = method[0]['lead_time']
+            type = method[0]['type']
+            
             parents = bom.get(material, [])
             parent_start_times = []
             for t_prev in range(t):
@@ -157,6 +162,10 @@ def apply_field_constraints(logits_dict, prev_tokens):
                     # lead_time
                     logits_dict['lead_time'][b, t, :] = float('-inf')
                     logits_dict['lead_time'][b, t, int(lead_time)] = 0.0
+
+                    # type
+                    logits_dict['type'][b, t, :] = float('-inf')
+                    logits_dict['type'][b, t, int(type)] = 0.0
 
                     # location
                     if prev['type'] == get_token_type('move'):  # move

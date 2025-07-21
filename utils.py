@@ -56,6 +56,15 @@ def load_csv(path):
     return pd.read_csv(path)
 
 methods = defaultdict(list)
+def get_method(key, path="data/method.csv"):
+    global methods
+    if methods is None or len(methods) == 0 :
+        for _, row in load_csv(path).iterrows():
+            k = (row['material_id'], row['location_id'], row['type'])
+            methods[k].append(row)
+
+    return methods.get(key, [])
+
 def get_method_lead_time(key, path="data/method.csv"):
     global methods
     if methods is None or len(methods) == 0 :

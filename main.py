@@ -19,7 +19,7 @@ from logging.handlers import RotatingFileHandler
 from transformer import restore_model
 from utils import update_config_from_static_data
 from train import train, train_stepwise
-from predict import predict_plan, evaluate_plan, print_plan_vs_demand
+from predict import predict_plan, test_predict_plan
 
 from config import config, logger
 
@@ -41,17 +41,20 @@ def main():
         train(args)
     elif args.predict:
         _, model = restore_model()
+        test_predict_plan(model)
+
+        '''
         input_example = {
             "input": {
                 "demand": [
-                    {"type": 0, "demand_id": 0, "location_id": 1, "material_id": 89, "request_time": 8, "commit_time": 8, "start_time": 8, "end_time": 8, "quantity": 339},
+                    {"type": 0, "demand_id": 0, "location_id": 1, "material_id": 50, "request_time": 5, "commit_time": 0, "start_time": 0, "end_time": 0, "quantity": 48, "lead_time": 0},
                 ]
             },
             "tgt": []
         }
 
         aps_example = [
-            {"type": 2, "demand_id": 0, "location_id": 1, "material_id": 89, "request_time": 8, "commit_time": 8, "start_time": 5, "end_time": 8, "quantity": 339},
+             {"type": 0, "demand_id": 0, "location_id": 1, "material_id": 50, "request_time": 5, "commit_time": 0, "start_time": 0, "end_time": 0, "quantity": 48, "lead_time": 0},
         ]
 
         plan = predict_plan(model, input_example)
@@ -63,7 +66,8 @@ def main():
         evaluate_plan(plan, aps_example)
 
         print_plan_vs_demand(plan, aps_example)
-
+        '''
+        
 if __name__ == "__main__":
     main()
 

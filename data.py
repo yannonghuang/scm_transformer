@@ -62,8 +62,9 @@ class SCMDataset(Dataset):
         sample_dir = self.sample_dirs[idx]
 
         #src = self.load_demand(sample_dir / "demands.csv")
-        demand_dicts, _ = self.load_demand(sample_dir / "demands.csv")
-        src = generate_encoder_input({"demand": demand_dicts})
+        demand_dicts, tokens = self.load_demand(sample_dir / "demands.csv")
+        src = generate_encoder_input(tokens, istensor=True)
+        #src = generate_encoder_input({"demand": demand_dicts})
 
         #tgt, labels = self.load_plan(sample_dir / "workorders.csv")
         #return src, tgt, labels
@@ -87,13 +88,13 @@ class SCMDataset(Dataset):
             "start_time": torch.zeros((len(df)), dtype=torch.long),
             "end_time": torch.zeros((len(df)), dtype=torch.long),
             "request_time": torch.tensor(df["request_time"].values, dtype=torch.long),
-            "commit_time": torch.zeros((len(df)), dtype=torch.long),
+            "commit_time": torch.tensor(df["commit_time"].values, dtype=torch.long),
             "lead_time": torch.zeros((len(df)), dtype=torch.long),
 
             "parent": torch.zeros((len(df)), dtype=torch.long),
             "child": torch.zeros((len(df)), dtype=torch.long),
 
-            "source_location": torch.zeros((len(df)), dtype=torch.long),
+            "source_location": torch.tensor(df["location_id"].values, dtype=torch.long),
         }
         return demand_dicts, tokens
 
@@ -239,11 +240,15 @@ def encode_tokens(token_list, token_type_id=1):
     }
 
 # --- Updated Combined Input Token Generator ---
-def generate_encoder_input(input_dict):
+def generate_encoder_input(input_dict, istensor=False):
     static_tokens = generate_static_tokens()
-    dynamic_tokens = generate_candidate_tokens(input_dict)
     encoded_static = encode_tokens(static_tokens, token_type_id=0)
-    encoded_dynamic = encode_tokens(dynamic_tokens, token_type_id=1)
+
+    if not istensor:
+        dynamic_tokens = generate_candidate_tokens(input_dict)
+        encoded_dynamic = encode_tokens(dynamic_tokens, token_type_id=1)
+    else:
+        encoded_dynamic = input_dict
 
     combined = {}
     all_keys = set(encoded_static.keys()) | set(encoded_dynamic.keys())

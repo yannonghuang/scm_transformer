@@ -1,16 +1,23 @@
 import torch
 from constraint import apply_bom_mask, apply_field_constraints, apply_demand_constraints
 from config import get_token_type, get_token_label
+from data import generate_encoder_input
 
 @torch.no_grad()
 def predict_plan(model, src_tokens, max_steps=512):
     model.eval()
     device = src_tokens['type'].device
 
+    for k in src_tokens:
+        if src_tokens[k].dim() == 1:
+            src_tokens[k] = src_tokens[k].unsqueeze(0)
+
     # Initial output sequence (batch size 1)
-    prev_tokens = {k: [] for k in src_tokens}
+    prev_tokens = {k: [] for k in src_tokens if k not in ["parent", "child", "method"]}
     planned_demand_ids = set()
     step = 0
+
+    #src_tokens = {k: src_tokens[k].unsqueeze(0) for k in src_tokens}
 
     while step < max_steps:
         # === 1. Find the next demand in src_tokens not yet planned ===
@@ -43,7 +50,7 @@ def predict_plan(model, src_tokens, max_steps=512):
             logits_dict = model(src_tokens, tgt_tokens)
 
             apply_bom_mask(logits_dict['material'], src_tokens, tgt_tokens)
-            apply_field_constraints(logits_dict, tgt_tokens)
+            apply_field_constraints(logits_dict, src_tokens, tgt_tokens)
             apply_demand_constraints(logits_dict, src_tokens, tgt_tokens)
 
             next_token = {
@@ -93,7 +100,7 @@ def mock_src_tokens():
 
     df = pd.read_csv("data/samples/depth_0/sample_0/demands.csv")
 
-    src_tokens = {
+    _src_tokens = {
         "type":        torch.tensor([[0] * len(df)], device=device), # assuming 0 = demand
         "material":    torch.tensor([df["material_id"].tolist()], device=device),
         "location":    torch.tensor([df["location_id"].tolist()],device=device),
@@ -109,7 +116,34 @@ def mock_src_tokens():
         "lead_time":  torch.tensor([[0] * len(df)], device=device),
     }
 
-    return src_tokens
+    src_tokens = {
+        "demand": torch.tensor(df["demand_id"].values, dtype=torch.long), 
+        "type": torch.zeros((len(df)), dtype=torch.long),
+        "location": torch.tensor(df["location_id"].values, dtype=torch.long),
+        "material": torch.tensor(df["material_id"].values, dtype=torch.long),
+        #"time": torch.tensor(df["request_time"].values, dtype=torch.long),
+
+        #"quantity": torch.tensor(df["quantity"].values, dtype=torch.float),
+        "quantity": torch.tensor(df["quantity"].values, dtype=torch.long),
+
+        "start_time": torch.zeros((len(df)), dtype=torch.long),
+        "end_time": torch.zeros((len(df)), dtype=torch.long),
+        "request_time": torch.tensor(df["request_time"].values, dtype=torch.long),
+        "commit_time": torch.tensor(df["commit_time"].values, dtype=torch.long),
+        "lead_time": torch.zeros((len(df)), dtype=torch.long),
+
+        "parent": torch.zeros((len(df)), dtype=torch.long),
+        "child": torch.zeros((len(df)), dtype=torch.long),
+
+        "source_location": torch.tensor(df["location_id"].values, dtype=torch.long),
+    }
+    
+    #return src_tokens
+    return generate_encoder_input(src_tokens, istensor=True)
+
+
+
+
 
 def decode_tokens(tokens):
     """Pretty prints the output plan."""

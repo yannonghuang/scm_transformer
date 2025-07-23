@@ -16,7 +16,8 @@ from collections import defaultdict
 
 from config import logger, config, get_token_type
 from utils import load_bom, load_bom_parent, get_method_lead_time
-from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints, compute_make_to_bom_mask, compute_bom_to_make_mask
+from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints
+from attention import compute_bom_mask, compute_method_mask
 
 # --- Embedding Module (Updated) ---
 class SCMEmbedding(nn.Module):
@@ -108,6 +109,7 @@ class SCMTransformerModel(nn.Module):
             dropout=config['dropout'],
             batch_first=True
         )
+
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=config['d_model'],
             nhead=config['n_heads'],
@@ -117,10 +119,13 @@ class SCMTransformerModel(nn.Module):
         )
 
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=config['n_layers'])
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=config['n_layers'])
-        # In __init__ of SCMTransformer
-        #decoder_layer = BOMAwareDecoderLayer(config['d_model'], config['n_heads'])
-        #self.decoder_layers = nn.ModuleList([decoder_layer for _ in range(config['n_layers'])])
+        
+        if config['use_attention'] == 0:
+            self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=config['n_layers'])
+        else:
+            # In __init__ of SCMTransformer
+            decoder_layer = BOMAwareDecoderLayer(config['d_model'], config['n_heads'])
+            self.decoder_layers = nn.ModuleList([decoder_layer for _ in range(config['n_layers'])])
 
 
         d_model = config['d_model']
@@ -155,15 +160,34 @@ class SCMTransformerModel(nn.Module):
         tgt = self.embed(tgt_tokens)
 
         memory = self.encoder(src)
-        decoded = self.decoder(tgt, memory)
-        '''
-        bom_mask = compute_bom_mask(src_tokens, tgt_tokens)
-        x = tgt.transpose(0, 1)  # [T, B, D] → transpose back if needed
-        for layer in self.decoder_layers:
-            x = layer(x.transpose(0, 1), memory.transpose(0, 1), attn_bom_mask=bom_mask)  # [B, T, D]
-        decoded = x.transpose(0, 1)
-        '''
 
+        if config['use_attention'] == 0:
+            decoded = self.decoder(tgt, memory)
+        else:
+            # Apply attention masks thru custom decoder layer
+            make_to_bom_mask, bom_to_make_mask, make_to_make_mask = compute_bom_mask(src_tokens, tgt_tokens)
+            logger.debug(f"bom_mask shape before = {make_to_bom_mask.shape}")
+            B, T, S = make_to_bom_mask.shape
+            make_to_bom_mask = make_to_bom_mask.expand(B * config['n_heads'], T, S)
+            bom_to_make_mask = bom_to_make_mask.expand(B * config['n_heads'], T, S)
+            make_to_make_mask = make_to_make_mask.expand(B * config['n_heads'], T, T)
+            
+            demand_to_method_mask, method_to_workorder_mask, workorder_to_workorder_mask = compute_method_mask(src_tokens, tgt_tokens)
+            demand_to_method_mask = demand_to_method_mask.expand(B * config['n_heads'], T, S)
+            method_to_workorder_mask = method_to_workorder_mask.expand(B * config['n_heads'], T, S)
+            workorder_to_workorder_mask = workorder_to_workorder_mask.expand(B * config['n_heads'], T, T)
+
+            cross_attention_mask = make_to_bom_mask + bom_to_make_mask + demand_to_method_mask + method_to_workorder_mask
+            #cross_attention_mask = mask_method + mask_move_source
+            #cross_attention_mask = None
+            self_attention_mask = make_to_make_mask + workorder_to_workorder_mask
+            #self_attention_mask = None
+
+            x = tgt  # [B, T_tgt, D]
+            for layer in self.decoder_layers:
+                x = layer(x, memory, tgt_mask=self_attention_mask, attn_bom_mask=cross_attention_mask)  # [B, T_tgt, D]
+
+            decoded = x
 
         material_logits = self.material_out(decoded)
         #if bom_edges is not None:
@@ -257,11 +281,6 @@ class SCMTransformerModel(nn.Module):
 
         return output_logits
     
-    def decoder_with_mask(self, tgt_emb, memory, attn_mask=None):
-        out = tgt_emb
-        for layer in self.decoder_layers:
-            out = layer(out, memory, tgt_mask=attn_mask)
-        return out
 
 class BOMAwareDecoderLayer(nn.Module):
     def __init__(self, d_model, nhead):

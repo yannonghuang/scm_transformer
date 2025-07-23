@@ -234,47 +234,6 @@ def extract_bom_parent_from_tokens(src_tokens):
                 parent_maps[child].append(parent)
     return parent_maps
 
-
-def compute_make_to_bom_mask(src_tokens, tgt_tokens):
-    B, S = src_tokens['type'].shape
-    _, T = tgt_tokens['type'].shape
-
-    # Expand src and tgt fields to [B, T, S] for comparison
-    tgt_type = tgt_tokens['type'].unsqueeze(2).expand(B, T, S)             # [B, T, S]
-    tgt_material = tgt_tokens['material'].unsqueeze(2).expand(B, T, S)     # [B, T, S]
-
-    src_type = src_tokens['type'].unsqueeze(1).expand(B, T, S)             # [B, T, S]
-    src_parent = src_tokens['parent'].unsqueeze(1).expand(B, T, S)  # [B, T, S]
-
-    # Constants for token types (assuming you have these enums/constants defined)
-    TYPE_BOM = get_token_type('bom')
-    TYPE_MAKE = get_token_type('make')
-
-    # Apply the mask condition
-    mask = (tgt_type == TYPE_MAKE) & (src_type == TYPE_BOM) & (src_parent == tgt_material)  # [B, T, S]
-
-    return mask
-
-def compute_bom_to_make_mask(src_tokens, tgt_tokens):
-    B, S = src_tokens['type'].shape
-    _, T = tgt_tokens['type'].shape
-
-    # Expand src and tgt fields to [B, T, S] for comparison
-    tgt_type = tgt_tokens['type'].unsqueeze(1).expand(B, S, T)             # [B, S, T]
-    tgt_material = tgt_tokens['material'].unsqueeze(1).expand(B, S, T)     # [B, S, T]
-
-    src_type = src_tokens['type'].unsqueeze(2).expand(B, S, T)             # [B, S, T]
-    src_child = src_tokens['child'].unsqueeze(2).expand(B, S, T)  # [B, S, T]
-
-    # Constants for token types (assuming you have these enums/constants defined)
-    TYPE_BOM = get_token_type('bom')
-    TYPE_MAKE = get_token_type('make')
-
-    # Apply the mask condition
-    mask = (src_type == TYPE_BOM) & (tgt_type == TYPE_MAKE) & (src_child == tgt_material)  # [B, S, T]
-
-    return mask
-
 def _apply_field_constraints(self, logits_dict, prev_tokens): # this one works
     B, T = prev_tokens['type'].shape[:2]
 

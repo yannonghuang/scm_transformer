@@ -177,11 +177,11 @@ class SCMTransformerModel(nn.Module):
             method_to_workorder_mask = method_to_workorder_mask.expand(B * config['n_heads'], T, S)
             workorder_to_workorder_mask = workorder_to_workorder_mask.expand(B * config['n_heads'], T, T)
 
-            cross_attention_mask = make_to_bom_mask + bom_to_make_mask + demand_to_method_mask + method_to_workorder_mask
+            #cross_attention_mask = make_to_bom_mask + bom_to_make_mask + demand_to_method_mask + method_to_workorder_mask
             #cross_attention_mask = mask_method + mask_move_source
-            #cross_attention_mask = None
-            self_attention_mask = make_to_make_mask + workorder_to_workorder_mask
-            #self_attention_mask = None
+            cross_attention_mask = None
+            #self_attention_mask = make_to_make_mask + workorder_to_workorder_mask
+            self_attention_mask = None
 
             x = tgt  # [B, T_tgt, D]
             for layer in self.decoder_layers:

@@ -17,7 +17,7 @@ from collections import defaultdict
 from config import logger, config, get_token_type
 from utils import load_bom, load_bom_parent, get_method_lead_time
 from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints
-from attention import compute_bom_mask, compute_method_mask
+from attention import compute_attention_mask
 
 # --- Embedding Module (Updated) ---
 class SCMEmbedding(nn.Module):
@@ -165,23 +165,13 @@ class SCMTransformerModel(nn.Module):
             decoded = self.decoder(tgt, memory)
         else:
             # Apply attention masks thru custom decoder layer
-            make_to_bom_mask, bom_to_make_mask, make_to_make_mask = compute_bom_mask(src_tokens, tgt_tokens)
-            logger.debug(f"bom_mask shape before = {make_to_bom_mask.shape}")
-            B, T, S = make_to_bom_mask.shape
-            make_to_bom_mask = make_to_bom_mask.expand(B * config['n_heads'], T, S)
-            bom_to_make_mask = bom_to_make_mask.expand(B * config['n_heads'], T, S)
-            make_to_make_mask = make_to_make_mask.expand(B * config['n_heads'], T, T)
-            
-            demand_to_method_mask, method_to_workorder_mask, workorder_to_workorder_mask = compute_method_mask(src_tokens, tgt_tokens)
-            demand_to_method_mask = demand_to_method_mask.expand(B * config['n_heads'], T, S)
-            method_to_workorder_mask = method_to_workorder_mask.expand(B * config['n_heads'], T, S)
-            workorder_to_workorder_mask = workorder_to_workorder_mask.expand(B * config['n_heads'], T, T)
+            cross_attention_mask, self_attention_mask = compute_attention_mask(src_tokens, tgt_tokens)
+            B, T, S = cross_attention_mask.shape
+            cross_attention_mask = cross_attention_mask.expand(B * config['n_heads'], T, S)
+            self_attention_mask = self_attention_mask.expand(B * config['n_heads'], T, T)
 
-            #cross_attention_mask = make_to_bom_mask + bom_to_make_mask + demand_to_method_mask + method_to_workorder_mask
-            #cross_attention_mask = mask_method + mask_move_source
-            cross_attention_mask = None
-            #self_attention_mask = make_to_make_mask + workorder_to_workorder_mask
-            self_attention_mask = None
+            #cross_attention_mask = None
+            #self_attention_mask = None
 
             x = tgt  # [B, T_tgt, D]
             for layer in self.decoder_layers:

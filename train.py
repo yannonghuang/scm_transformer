@@ -36,11 +36,10 @@ def train(args):
         max_depth = get_max_depth(load_bom_graph())
 
     for d in range(max_depth + 1):
-        depth += 1
         next_depth = depth % (max_depth + 1)
         logger.info(f"\n📚 Training on samples with BOM depth <= {next_depth}")
         train_stepwise(model, next_depth)
-
+        depth += 1
 
 loss_weights = {'type': 1.0, 
     'demand': 1.0, 'material': 1.0, 'location': 1.0,
@@ -105,10 +104,8 @@ def train_stepwise(model=None, depth=None):
             labels = {k: v.to(device) for k, v in labels.items()}
             tgt_len = tgt['material'].shape[1]
 
-            tgt_tokens = {
-                key: tgt[key][:, :1].clone()
-                for key in tgt
-            }
+            #tgt_tokens = {key: tgt[key][:, :1].clone() for key in tgt}
+            tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
 
             loss_accum = 0.0
             #for t in range(1, tgt_len):
@@ -213,6 +210,7 @@ def train_stepwise(model=None, depth=None):
                 labels = {k: v.to(device) for k, v in labels.items()}
                 tgt_len = tgt['material'].shape[1]
 
+                #tgt_tokens = {key: tgt[key][:, :1].clone() for key in tgt}
                 tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
 
                 loss_accum = 0.0

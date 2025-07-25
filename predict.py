@@ -13,7 +13,7 @@ def predict_plan(model, src_tokens, max_steps=512):
             src_tokens[k] = src_tokens[k].unsqueeze(0)
 
     # Initial output sequence (batch size 1)
-    prev_tokens = {k: [] for k in src_tokens if k not in ["parent", "child", "method"]}
+    prev_tokens = {k: [0] for k in src_tokens if k not in ["parent", "child", "method"]}
     planned_demand_ids = set()
     step = 0
 

@@ -118,10 +118,14 @@ def main():
 
     for d in demands:
         solved_d, wos = solve_demand(d, methods, bom, now)
-        rows.append({'type': get_token_type('demand'), **solved_d})
-        for wo in wos:
-            rows.append({'type': 'workorder', **wo})
-        rows.append({'type': get_token_type('eod'), 'demand_id': d['demand_id']})
+
+        count = len(wos) + 2
+        rows.append({'type': get_token_type('demand'), **solved_d, 'seq_in_demand': 0, 'total_in_demand': count})
+        #for wo in wos:
+        for index, wo in enumerate(wos):
+            rows.append({'type': 'workorder', **wo, 'seq_in_demand': index + 1, 'total_in_demand': count})
+        rows.append({'type': get_token_type('eod'), 'demand_id': d['demand_id'], 'seq_in_demand': count - 1, 'total_in_demand': count})
+
     pd.DataFrame(rows).to_csv(os.path.join(args.output, 'combined_output.csv'), index=False)
     print("✅ Simulation complete. Outputs saved to:", args.output)
 

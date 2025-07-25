@@ -94,6 +94,22 @@ class SCMEmbedding(nn.Module):
         embeddings = (1 - is_bom) * e_combined + is_bom * e_bom
         return self.dropout(embeddings)
 
+class DemandPositionEmbedding(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.position_ratio_proj = nn.Linear(1, d_model)
+        self.eod_proj = nn.Embedding(2, d_model)  # binary: [not_eod=0, eod=1]
+
+    def forward(self, tgt_tokens):
+        seq = tgt_tokens["seq_in_demand"].float()  # [B, T]
+        total = tgt_tokens["total_in_demand"].float().clamp(min=1)  # avoid /0
+        ratio = (seq / total).unsqueeze(-1)  # [B, T, 1]
+
+        eod = ((seq + 1) == total).long()  # [B, T]
+        eod_emb = self.eod_proj(eod)      # [B, T, d_model]
+
+        ratio_emb = self.position_ratio_proj(ratio)  # [B, T, d_model]
+        return ratio_emb + eod_emb
 
 # --- Transformer Model ---
 DEBUG_FORWARD = True
@@ -338,166 +354,3 @@ def save_model(model, depth):
     torch.save(model.state_dict(), model_file_name)
     logger.info(f"✅ Model saved to {model_file_name}")
 
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class NEW_SCMTransformer(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-
-        # Base token embeddings
-        self.type_embedding = nn.Embedding(config.num_types, config.d_model)
-        self.material_embedding = nn.Embedding(config.num_materials, config.d_model)
-        self.location_embedding = nn.Embedding(config.num_locations, config.d_model)
-        self.time_embedding = nn.Embedding(config.num_time, config.d_model)
-        self.quantity_embedding = nn.Embedding(config.num_quantity, config.d_model)
-        self.demand_embedding = nn.Embedding(config.num_demand, config.d_model)
-
-        # Positional embedding for time-step t
-        self.position_embedding = nn.Embedding(config.max_seq_len, config.d_model)
-
-        # New: optional global timing offset embedding (e.g., lead_time or relative timing signal)
-        self.timing_offset_embedding = nn.Embedding(config.max_lead_time + 1, config.d_model)
-
-        # Input projection for encoder and decoder
-        self.input_proj = nn.Linear(config.d_model, config.d_model)
-
-        # Transformer encoder-decoder
-        encoder_layer = nn.TransformerEncoderLayer(d_model=config.d_model, nhead=config.nhead)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=config.num_encoder_layers)
-
-        #decoder_layer = nn.TransformerDecoderLayer(d_model=config.d_model, nhead=config.nhead)
-        #self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=config.num_decoder_layers)
-        self.decoder_layers = nn.ModuleList([
-            RelativeTransformerDecoderLayer(config.d_model, config.nhead)
-            for _ in range(config.num_decoder_layers)
-        ])
-
-        # Final output projections for each field
-        self.output_heads = nn.ModuleDict({
-            'type': nn.Linear(config.d_model, config.num_types),
-            'material': nn.Linear(config.d_model, config.num_materials),
-            'location': nn.Linear(config.d_model, config.num_locations),
-            'start_time': nn.Linear(config.d_model, config.num_time),
-            'end_time': nn.Linear(config.d_model, config.num_time),
-            'quantity': nn.Linear(config.d_model, config.num_quantity),
-            'demand': nn.Linear(config.d_model, config.num_demand),
-        })
-
-    def embed_token(self, token):
-        # Embed all fields and sum
-        e_type = self.type_embedding(token['type'])
-        e_material = self.material_embedding(token['material'])
-        e_location = self.location_embedding(token['location'])
-        e_start_time = self.time_embedding(token['start_time'])
-        e_end_time = self.time_embedding(token['end_time'])
-        e_quantity = self.quantity_embedding(token['quantity'])
-        e_demand = self.demand_embedding(token['demand'])
-
-        # Optionally include timing offset embeddings if available
-        if 'timing_offset' in token:
-            e_offset = self.timing_offset_embedding(token['timing_offset'])
-        else:
-            e_offset = 0
-
-        return e_type + e_material + e_location + e_start_time + e_end_time + e_quantity + e_demand + e_offset
-
-    def forward(self, src_tokens, tgt_tokens):
-        B, T = tgt_tokens['type'].shape
-
-        # Embed input and target tokens
-        src_emb = self.embed_sequence(src_tokens)
-        tgt_emb = self.embed_sequence(tgt_tokens)
-
-        # Add positional encoding
-        positions = torch.arange(T, device=src_emb.device).unsqueeze(0).expand(B, T)
-        pos_emb = self.position_embedding(positions)
-        tgt_emb = tgt_emb + pos_emb
-
-        # Input projection
-        src_emb = self.input_proj(src_emb)
-        tgt_emb = self.input_proj(tgt_emb)
-
-        # Transpose for transformer: [T, B, D]
-        memory = self.encoder(src_emb.transpose(0, 1))
-        decoded = self.decoder(tgt_emb.transpose(0, 1), memory)
-
-
-        start_times = tgt_tokens['start_time']  # [B, T]
-        rel_pos = start_times.unsqueeze(2) - start_times.unsqueeze(1)  # [B, T, T]
-
-        x = tgt_emb
-        for layer in self.decoder_layers:
-            x = layer(x, memory.transpose(0, 1), relative_positions=rel_pos)
-
-        logits_dict = {
-            field: head(x)
-            for field, head in self.output_heads.items()
-        }
-
-        '''
-        # Output heads
-        logits_dict = {
-            field: head(decoded.transpose(0, 1))
-            for field, head in self.output_heads.items()
-        }
-        '''
-
-        return logits_dict
-
-    def embed_sequence(self, tokens):
-        B, T = tokens['type'].shape
-        embeddings = []
-        for t in range(T):
-            token = {k: tokens[k][:, t] for k in tokens}
-            embeddings.append(self.embed_token(token))
-        return torch.stack(embeddings, dim=1)
-
-
-class RelativeTransformerDecoderLayer(nn.Module):
-    def __init__(self, d_model, nhead, dropout=0.1):
-        super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.linear1 = nn.Linear(d_model, d_model * 4)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(d_model * 4, d_model)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.dropout3 = nn.Dropout(dropout)
-
-        self.max_rel_pos = 32
-        self.rel_bias = nn.Embedding(2 * self.max_rel_pos + 1, nhead)
-
-    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, relative_positions=None):
-        # Compute self-attention with relative bias
-        B, T, D = tgt.shape
-        if relative_positions is not None:
-            clipped_rel_pos = torch.clamp(relative_positions, -self.max_rel_pos, self.max_rel_pos) + self.max_rel_pos
-            rel_bias = self.rel_bias(clipped_rel_pos)  # [B, T, T, H]
-            rel_bias = rel_bias.permute(0, 3, 1, 2)    # [B, H, T, T]
-            rel_bias = rel_bias.mean(dim=1)            # [B, T, T] — avg over heads
-        else:
-            rel_bias = None
-
-        tgt2, attn_weights = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask, need_weights=True)
-        if rel_bias is not None:
-            tgt2 += rel_bias  # inject bias into attention scores
-
-        tgt = tgt + self.dropout1(tgt2)
-        tgt = self.norm1(tgt)
-
-        tgt2 = self.multihead_attn(tgt, memory, memory, attn_mask=memory_mask)[0]
-        tgt = tgt + self.dropout2(tgt2)
-        tgt = self.norm2(tgt)
-
-        tgt2 = self.linear2(self.dropout(F.relu(self.linear1(tgt))))
-        tgt = tgt + self.dropout3(tgt2)
-        tgt = self.norm3(tgt)
-        return tgt

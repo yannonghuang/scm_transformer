@@ -34,7 +34,7 @@ console_handler.setFormatter(formatter)
 
 # Get the root logger and set the level
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)  # Set global log level here
+logger.setLevel(logging.INFO)  # Set global log level here
 
 # Add both handlers to the logger
 logger.addHandler(rotating_handler)

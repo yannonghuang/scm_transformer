@@ -66,9 +66,80 @@ loss_weights = {
     'total_in_demand': 0.5      # likewise
 }
 
+def learn(model, data_loader, device, optimizer=None):
+    total_loss = 0.0
+    for src, tgt, labels in data_loader:
+        src = {k: v.to(device) for k, v in src.items()}
+        tgt = {k: v.to(device) for k, v in tgt.items()}
+        labels = {k: v.to(device) for k, v in labels.items()}
+        tgt_len = tgt['material'].shape[1]
+
+        #tgt_tokens = {key: tgt[key][:, :1].clone() for key in tgt}
+        tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
+
+        loss_accum = 0.0
+        #for t in range(1, tgt_len):
+        for t in range(tgt_len):
+            pred = model(src, tgt_tokens)
+            last_pred = {k: v[:, -1] for k, v in pred.items()}
+
+            loss_items = defaultdict(float)
+
+            for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time', 'seq_in_demand', 'total_in_demand']:
+            #for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time']:
+                logits = last_pred[k]
+                target = labels[k][:, t]
+                max_val = target.max().item()
+                min_val = target.min().item()
+
+                logger.debug(f"🧪 {k} logits.shape={logits.shape}, target={target.tolist()}, min_val={min_val}, max_val={max_val}")
+
+                try:
+                    if max_val >= logits.shape[-1] or min_val < 0:
+                        logger.warning(f"⚠️ Invalid target for {k}: {target.tolist()} (logits.shape={logits.shape}, min={min_val}, max={max_val})")
+                        raise ValueError("Target out of bounds")
+
+                    #if logits.max().item() > -1e4:
+                    if torch.isfinite(logits.max()).item():
+                        field_loss = F.cross_entropy(logits, target)
+                    if field_loss is not None and torch.isfinite(field_loss).item():
+                        loss_items[k] = field_loss
+
+                    #if not torch.isfinite(loss_items[k]):
+                    #    raise ValueError("Non-finite loss")
+                except Exception as e:
+                    logger.error(f"❌ Skipping loss[{k}] due to {str(e)}")
+                    logger.debug(f"  logits = {logits}")
+                    logger.debug(f"  target = {target}")
+                    loss_items[k] = torch.tensor(1e9, device=device)
+
+            eod_logits = last_pred['eod']
+            #eod_labels = (labels['type'][:, t] == get_token_type('eod')).float()
+            eod_labels = ((labels["seq_in_demand"][:, t] + 1) == labels["total_in_demand"][:, t]).float()
+            eod_loss = F.binary_cross_entropy_with_logits(eod_logits, eod_labels, reduction="mean")
+            loss_items['eod'] = eod_loss
+                            
+            for k, v in loss_items.items():
+                logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
+
+            loss = sum(loss_weights[k] * loss_items[k] for k in loss_items)
+
+            loss_accum += loss
+            for key in tgt_tokens:
+                val = tgt[key][:, t].unsqueeze(1)
+                tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
+
+        if optimizer is not None:
+            optimizer.zero_grad()
+            loss_accum.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+        total_loss += loss_accum.item()
+
+    return total_loss
 
 def train_stepwise(model=None, depth=None):
-    MASK_VAL = -1e9
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if model is None:
@@ -88,73 +159,8 @@ def train_stepwise(model=None, depth=None):
 
     model.train()
     for epoch in range(config['epochs']):
-        total_loss = 0.0
-        for src, tgt, labels in train_loader:
-            src = {k: v.to(device) for k, v in src.items()}
-            tgt = {k: v.to(device) for k, v in tgt.items()}
-            labels = {k: v.to(device) for k, v in labels.items()}
-            tgt_len = tgt['material'].shape[1]
-
-            #tgt_tokens = {key: tgt[key][:, :1].clone() for key in tgt}
-            tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
-
-            loss_accum = 0.0
-            #for t in range(1, tgt_len):
-            for t in range(tgt_len):
-                pred = model(src, tgt_tokens)
-                last_pred = {k: v[:, -1] for k, v in pred.items()}
-
-                loss_items = defaultdict(float)
-
-                for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time', 'seq_in_demand', 'total_in_demand']:
-                #for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time']:
-                    logits = last_pred[k]
-                    target = labels[k][:, t]
-                    max_val = target.max().item()
-                    min_val = target.min().item()
-
-                    logger.debug(f"🧪 {k} logits.shape={logits.shape}, target={target.tolist()}, min_val={min_val}, max_val={max_val}")
-
-                    try:
-                        if max_val >= logits.shape[-1] or min_val < 0:
-                            logger.warning(f"⚠️ Invalid target for {k}: {target.tolist()} (logits.shape={logits.shape}, min={min_val}, max={max_val})")
-                            raise ValueError("Target out of bounds")
-
-                        #if logits.max().item() > -1e4:
-                        if torch.isfinite(logits.max()).item():
-                            field_loss = F.cross_entropy(logits, target)
-                        if field_loss is not None and torch.isfinite(field_loss).item():
-                            loss_items[k] = field_loss
-
-                        #if not torch.isfinite(loss_items[k]):
-                        #    raise ValueError("Non-finite loss")
-                    except Exception as e:
-                        logger.error(f"❌ Skipping loss[{k}] due to {str(e)}")
-                        logger.debug(f"  logits = {logits}")
-                        logger.debug(f"  target = {target}")
-                        loss_items[k] = torch.tensor(1e9, device=device)
-
-                eod_logits = last_pred['eod']
-                #eod_labels = (labels['type'][:, t] == get_token_type('eod')).float()
-                eod_labels = ((labels["seq_in_demand"][:, t] + 1) == labels["total_in_demand"][:, t]).float()
-                eod_loss = F.binary_cross_entropy_with_logits(eod_logits, eod_labels, reduction="mean")
-                loss_items['eod'] = eod_loss
-                                
-                for k, v in loss_items.items():
-                    logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
-
-                loss = sum(loss_weights[k] * loss_items[k] for k in loss_items)
-
-                loss_accum += loss
-                for key in tgt_tokens:
-                    val = tgt[key][:, t].unsqueeze(1)
-                    tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
-
-            optimizer.zero_grad()
-            loss_accum.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            total_loss += loss_accum.item()
+        
+        total_loss = learn(model, train_loader, device, optimizer)
 
         scheduler.step(total_loss)
         if scheduler.num_bad_epochs == 0:
@@ -168,59 +174,8 @@ def train_stepwise(model=None, depth=None):
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for src, tgt, labels in val_loader:
-                src = {k: v.to(device) for k, v in src.items()}
-                tgt = {k: v.to(device) for k, v in tgt.items()}
-                labels = {k: v.to(device) for k, v in labels.items()}
-                tgt_len = tgt['material'].shape[1]
-
-                #tgt_tokens = {key: tgt[key][:, :1].clone() for key in tgt}
-                tgt_tokens = {k: torch.zeros((1, 1), dtype=v.dtype, device=device) for k, v in tgt.items()}
-
-                loss_accum = 0.0
-                for t in range(tgt_len):
-                    pred = model(src, tgt_tokens)
-                    last_pred = {k: v[:, -1] for k, v in pred.items()}
-
-                    loss_items = defaultdict(float)
-                    for k in ['quantity', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time', 'seq_in_demand', 'total_in_demand']:
-                        logits = last_pred[k]
-                        target = labels[k][:, t]
-                        max_val = target.max().item()
-                        min_val = target.min().item()
-
-                        try:
-                            if max_val >= logits.shape[-1] or min_val < 0:
-                                raise ValueError("Target out of bounds")
-
-                            #if logits.max().item() > -1e4:
-                            if torch.isfinite(logits.max()).item():
-                                field_loss = F.cross_entropy(logits, target)
-                            if field_loss is not None and torch.isfinite(field_loss).item():
-                                loss_items[k] = field_loss
-                                
-                            #if not torch.isfinite(loss_items[k]):
-                            #    raise ValueError("Non-finite loss")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Validation loss[{k}] skipped: {str(e)}")
-                            loss_items[k] = torch.tensor(1e9, device=device)
-
-                    eod_logits = last_pred['eod']
-                    #eod_labels = (labels['type'][:, t] == get_token_type('eod')).float()
-                    eod_labels = ((labels["seq_in_demand"][:, t] + 1) == labels["total_in_demand"][:, t]).float()
-                    eod_loss = F.binary_cross_entropy_with_logits(eod_logits, eod_labels, reduction="mean")
-                    loss_items['eod'] = eod_loss
-
-                    val_loss_step = sum(loss_weights.get(k, 1.0) * loss_items[k] for k in loss_items)
-                    loss_accum += val_loss_step
-
-                    for key in tgt_tokens:
-                        val = tgt[key][:, t].unsqueeze(1)
-                        tgt_tokens[key] = torch.cat([tgt_tokens[key], val], dim=1)
-                try:
-                    val_loss += loss_accum.item()
-                except Exception as e:
-                    val_loss += loss_accum
+            val_loss = learn(model, val_loader, device)
+        
         model.train()
         logger.info(f"🔍 Validation Loss: {val_loss:.4f}")
 

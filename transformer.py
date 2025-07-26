@@ -118,7 +118,7 @@ class DemandPositionEmbedding(nn.Module):
         return self.dropout(ratio_emb + eod_emb)
 
 # --- Transformer Model ---
-DEBUG_FORWARD = True
+DEBUG_FORWARD = False
 class SCMTransformerModel(nn.Module):
     def __init__(self, config):
         super().__init__()

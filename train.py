@@ -41,40 +41,30 @@ def train(args):
         train_stepwise(model, next_depth)
         depth += 1
 
-loss_weights = {'type': 1.0, 
-    'demand': 1.0, 'material': 1.0, 'location': 1.0,
-    'start_time': 1.0, 'end_time': 1.0, 'request_time': 1.0,
-    'commit_time': 1.0, 'quantity': 1.0, 'lead_time': 1.0,
-    'eod': 1.0, 'seq_in_demand': 1.0, 'total_in_demand': 1.0
+loss_weights = {
+    # Core action decisions
+    'type': 2.0,                # pick make/move/purchase correctly
+    'material': 2.0,            # critical to right output
+    'location': 1.5,            # mildly less critical than material
+
+    # Temporal correctness
+    'start_time': 1.0,
+    'end_time': 1.0,
+    'commit_time': 1.0,
+    'lead_time': 0.5,           # often derived from others
+
+    # Quantitative accuracy
+    'quantity': 1.0,
+
+    # Reference demand matching
+    'demand': 1.0,
+    'request_time': 0.5,        # often repeated or inferred
+
+    # Sequence structure
+    'eod': 2.0,                 # very important for stopping correctly
+    'seq_in_demand': 1.5,       # helpful but secondary
+    'total_in_demand': 0.5      # likewise
 }
-
-
-def compute_loss(logits, targets):
-    if logits.shape[:-1] != targets.shape:
-        return None  # shape mismatch, cannot compute loss
-
-    IGNORE_INDEX = -100  # this tells PyTorch to ignore these targets in loss
-    return F.cross_entropy(
-        logits.view(-1, logits.size(-1)),
-        targets.view(-1),
-        ignore_index=IGNORE_INDEX
-    )
-
-def _compute_loss(logits, targets):
-    MASK_THRESH = -1e5
-
-    B, T, V = logits.shape
-    logits = logits.view(B * T, V)
-    targets = targets.view(B * T)
-
-    logit_max = logits.max(dim=-1).values
-    valid = logit_max > MASK_THRESH
-
-    if valid.sum() == 0:
-        return logits.sum() * 0.0  # safely returns zero loss with gradient path
-
-    return F.cross_entropy(logits[valid], targets[valid], reduction='mean')
-
 
 
 def train_stepwise(model=None, depth=None):

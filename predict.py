@@ -136,6 +136,9 @@ def mock_src_tokens():
         "child": torch.zeros((len(df)), dtype=torch.long),
 
         "source_location": torch.tensor(df["location_id"].values, dtype=torch.long),
+
+        "seq_in_demand": torch.zeros((len(df)), dtype=torch.long),
+        "total_in_demand": torch.zeros((len(df)), dtype=torch.long),
     }
     
     #return src_tokens
@@ -160,6 +163,7 @@ def decode_tokens(tokens):
 def test_predict_plan(model):
     print("=== Running test_predict_plan ===")
     src_tokens = mock_src_tokens()
+    
     predicted = predict_plan(model, src_tokens, max_steps=100)
     rows = decode_tokens(predicted)
     for i, row in enumerate(rows):

@@ -267,6 +267,7 @@ def generate_encoder_input(input_dict, istensor=False):
     for k in all_keys:
         static_val = encoded_static.get(k)
         dynamic_val = encoded_dynamic.get(k)
+
         if static_val is None and dynamic_val is not None:
             combined[k] = torch.cat([
                 torch.zeros_like(dynamic_val), dynamic_val
@@ -277,5 +278,6 @@ def generate_encoder_input(input_dict, istensor=False):
             ], dim=0)
         elif static_val is not None and dynamic_val is not None:
             combined[k] = torch.cat([static_val, dynamic_val], dim=0)
+
     return combined
 

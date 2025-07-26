@@ -80,5 +80,6 @@ config = {
     "max_train_samples": 1000,
     'quantity_scale': 1,  # updated to allow integer binning
     'max_quantity': 100, #1e5
-    'use_attention': 1
+    'use_attention': 1,
+    "max_total_in_demand": 30
 }

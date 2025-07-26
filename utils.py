@@ -80,6 +80,7 @@ def update_config_from_static_data(config, samples_root="data/samples"):
     max_location = -1
     max_method = -1
     max_time = -1
+    max_total_in_demand = -1
 
     #for sample_dir in Path(logs_root).glob("sample_*"):
     for sample_dir in Path(samples_root).glob("depth_*/sample_*"):
@@ -99,6 +100,9 @@ def update_config_from_static_data(config, samples_root="data/samples"):
                     max_time = max(max_time, df["request_time"].max())
                 if "commit_time" in df.columns:
                     max_time = max(max_time, df["commit_time"].max())
+                if "total_in_demand" in df.columns:
+                    max_total_in_demand = max(max_total_in_demand, df["total_in_demand"].max())
+                    
 
     fpath = Path("data/method.csv")
     if fpath.exists():
@@ -110,8 +114,9 @@ def update_config_from_static_data(config, samples_root="data/samples"):
     config['num_locations'] = max_location + 1
     config['num_methods'] = max_method + 1
     config['num_time_steps'] = int(max_time + 1)
+    config['max_total_in_demand'] = int(max_total_in_demand + 1)
 
-    logger.info(f"🔧 Config updated: {config['num_materials']} materials, {config['num_locations']} locations, {config['num_methods']} methods, {config['num_time_steps']} time steps")
+    logger.info(f"🔧 Config updated: {config['num_materials']} materials, {config['num_locations']} locations, {config['num_methods']} methods, {config['num_time_steps']} time steps, {config['max_total_in_demand']} max_total_in_demand")
 
 def get_max_depth(G):
     """Safely compute max depth of a DAG from leaves upwards."""

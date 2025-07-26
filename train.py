@@ -18,7 +18,7 @@ from logging.handlers import RotatingFileHandler
 
 from config import config
 from transformer import SCMTransformerModel, restore_model, save_model
-from config import logger
+from config import logger, get_token_type
 from data import SCMDataset
 from utils import get_max_depth, load_bom_graph
 
@@ -44,7 +44,8 @@ def train(args):
 loss_weights = {'type': 1.0, 
     'demand': 1.0, 'material': 1.0, 'location': 1.0,
     'start_time': 1.0, 'end_time': 1.0, 'request_time': 1.0,
-    'commit_time': 1.0, 'quantity': 1.0, 'lead_time': 1.0
+    'commit_time': 1.0, 'quantity': 1.0, 'lead_time': 1.0,
+    'eod': 1.0, 'seq_in_demand': 1.0, 'total_in_demand': 1.0
 }
 
 
@@ -115,7 +116,8 @@ def train_stepwise(model=None, depth=None):
 
                 loss_items = defaultdict(float)
 
-                for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time']:
+                for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time', 'seq_in_demand', 'total_in_demand']:
+                #for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time']:
                     logits = last_pred[k]
                     target = labels[k][:, t]
                     max_val = target.max().item()
@@ -127,40 +129,12 @@ def train_stepwise(model=None, depth=None):
                         if max_val >= logits.shape[-1] or min_val < 0:
                             logger.warning(f"⚠️ Invalid target for {k}: {target.tolist()} (logits.shape={logits.shape}, min={min_val}, max={max_val})")
                             raise ValueError("Target out of bounds")
-                        '''
-                        # Replace MASK_VAL with -100 for ignoring
-                        if isinstance(target, torch.Tensor) and (target == MASK_VAL).any():
-                            target = target.masked_fill(target == MASK_VAL, -100)
-                        
-                        field_loss = None
-                        if (logits.max(dim=-1).values > -1e6).any():                        
-                            field_loss = compute_loss(logits, target)
-    
-                        if (
-                            field_loss is not None 
-                            and isinstance(field_loss, torch.Tensor) 
-                            and field_loss.requires_grad 
-                            and field_loss.numel() == 1 
-                            and field_loss.item() < -MASK_VAL
-                        ):
-                            loss_items[k] = field_loss
-                        '''
 
                         #if logits.max().item() > -1e4:
                         if torch.isfinite(logits.max()).item():
                             field_loss = F.cross_entropy(logits, target)
                         if field_loss is not None and torch.isfinite(field_loss).item():
                             loss_items[k] = field_loss
-
-                        '''
-                        B, T, V = logits.shape
-                        logits_flat = logits.view(B * T, V)
-                        logit_max = logits_flat.max(dim=-1).values
-                        valid = logit_max > -1e5
-                        if valid.any():
-                            #loss_items[k] = compute_loss(logits, target)
-                        '''
-                        
 
                         #if not torch.isfinite(loss_items[k]):
                         #    raise ValueError("Non-finite loss")
@@ -170,12 +144,12 @@ def train_stepwise(model=None, depth=None):
                         logger.debug(f"  target = {target}")
                         loss_items[k] = torch.tensor(1e9, device=device)
 
-                '''
-                pred_q_class = last_pred['quantity']
-                target_q_class = quantize_quantity(labels['quantity'][:, t])
-                loss_items['quantity'] = F.cross_entropy(pred_q_class, target_q_class)
-                '''
-
+                eod_logits = last_pred['eod']
+                #eod_labels = (labels['type'][:, t] == get_token_type('eod')).float()
+                eod_labels = ((labels["seq_in_demand"][:, t] + 1) == labels["total_in_demand"][:, t]).float()
+                eod_loss = F.binary_cross_entropy_with_logits(eod_logits, eod_labels, reduction="mean")
+                loss_items['eod'] = eod_loss
+                                
                 for k, v in loss_items.items():
                     logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
 
@@ -219,7 +193,7 @@ def train_stepwise(model=None, depth=None):
                     last_pred = {k: v[:, -1] for k, v in pred.items()}
 
                     loss_items = defaultdict(float)
-                    for k in ['quantity', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time']:
+                    for k in ['quantity', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time', 'seq_in_demand', 'total_in_demand']:
                         logits = last_pred[k]
                         target = labels[k][:, t]
                         max_val = target.max().item()
@@ -228,23 +202,6 @@ def train_stepwise(model=None, depth=None):
                         try:
                             if max_val >= logits.shape[-1] or min_val < 0:
                                 raise ValueError("Target out of bounds")
-                            '''
-                            # Replace MASK_VAL with -100 for ignoring
-                            if isinstance(target, torch.Tensor) and (target == MASK_VAL).any():
-                                target = target.masked_fill(target == MASK_VAL, -100)
-                            
-                            field_loss = None
-                            if (logits.max(dim=-1).values > -1e6).any():                        
-                                field_loss = compute_loss(logits, target)
-                            if (
-                                    field_loss is not None 
-                                    and isinstance(field_loss, torch.Tensor) 
-                                    and field_loss.requires_grad 
-                                    and field_loss.numel() == 1 
-                                    and field_loss.item() < -MASK_VAL
-                                ):
-                                loss_items[k] = field_loss
-                            '''
 
                             #if logits.max().item() > -1e4:
                             if torch.isfinite(logits.max()).item():
@@ -252,32 +209,17 @@ def train_stepwise(model=None, depth=None):
                             if field_loss is not None and torch.isfinite(field_loss).item():
                                 loss_items[k] = field_loss
                                 
-                            '''
-                            B, T, V = logits.shape
-                            logits_flat = logits.view(B * T, V)
-                            logit_max = logits_flat.max(dim=-1).values
-                            valid = logit_max > -1e5
-                            if valid.any():                            
-                                #loss_items[k] = compute_loss(logits, target)
-                                #loss_items[k] = F.cross_entropy(logits[valid], target[valid], reduction='mean')
-                                #loss_items[k] = F.cross_entropy(logits, target, reduction='mean')
-                                loss_items[k] = F.cross_entropy(logits, target)
-                            '''
-
                             #if not torch.isfinite(loss_items[k]):
                             #    raise ValueError("Non-finite loss")
                         except Exception as e:
                             logger.warning(f"⚠️ Validation loss[{k}] skipped: {str(e)}")
                             loss_items[k] = torch.tensor(1e9, device=device)
-                    '''
-                    try:
-                        pred_q_class = last_pred['quantity']
-                        target_q_class = quantize_quantity(labels['quantity'][:, t])
-                        loss_items['quantity'] = F.cross_entropy(pred_q_class, target_q_class)
-                    except Exception as e:
-                        logger.warning(f"⚠️ Validation loss[quantity] skipped: {str(e)}")
-                        loss_items['quantity'] = torch.tensor(1e9, device=device)
-                    '''
+
+                    eod_logits = last_pred['eod']
+                    #eod_labels = (labels['type'][:, t] == get_token_type('eod')).float()
+                    eod_labels = ((labels["seq_in_demand"][:, t] + 1) == labels["total_in_demand"][:, t]).float()
+                    eod_loss = F.binary_cross_entropy_with_logits(eod_logits, eod_labels, reduction="mean")
+                    loss_items['eod'] = eod_loss
 
                     val_loss_step = sum(loss_weights.get(k, 1.0) * loss_items[k] for k in loss_items)
                     loss_accum += val_loss_step

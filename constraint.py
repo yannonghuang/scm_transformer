@@ -77,7 +77,8 @@ def apply_field_constraints(logits_dict, src_tokens, prev_tokens):
             if not method:
                 # Invalid method: mask entire token
                 for field in logits_dict:
-                    logits_dict[field][b, t, :] = float('-inf')
+                    if field != 'eod':
+                        logits_dict[field][b, t, :] = float('-inf')
                 continue
 
             lead_time = method[0]['lead_time']

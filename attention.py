@@ -233,30 +233,6 @@ def compute_attention_mask(src_tokens, tgt_tokens):
     return cross_attention_mask, self_attention_mask
 
 
-
-def build_plan_structure_mask(tgt_tokens: dict) -> torch.Tensor:
-    """
-    Attention mask allowing tokens to attend to earlier tokens within the same demand.
-    Respects both causality and demand grouping.
-
-    Args:
-        tgt_tokens: dict with keys ['demand', 'seq_in_demand', 'total_in_demand']
-                   all of shape [B, T]
-    
-    Returns:
-        mask: [B, T, T] boolean tensor (True = attend, False = blocked)
-    """
-    demand = tgt_tokens["demand"]  # [B, T]
-    B, T = demand.shape
-
-    causal_mask = torch.tril(torch.ones((T, T), dtype=torch.bool, device=demand.device))  # [T, T]
-    same_demand = (demand.unsqueeze(2) == demand.unsqueeze(1))  # [B, T, T]
-
-    mask = same_demand & causal_mask.unsqueeze(0)  # [B, T, T]
-    return mask
-
-
-def TODELETE_get_method_attention_bias(src_tokens, tgt_tokens):
     """
     Returns a bias tensor of shape (B, T_tgt, T_src) where invalid attentions are masked with -inf.
     src_tokens: dict of tensors for static method tokens, each of shape (B, T_src)

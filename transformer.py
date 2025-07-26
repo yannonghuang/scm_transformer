@@ -31,6 +31,9 @@ class SCMEmbedding(nn.Module):
         self.mat_emb = nn.Embedding(config['num_materials'], d_model)
         self.method_emb = nn.Embedding(config['num_methods'], d_model)
 
+        self.seq_in_demand_emb = nn.Embedding(config['max_total_in_demand'], d_model)
+        self.total_in_demand_emb = nn.Embedding(config['max_total_in_demand'], d_model)
+
         #num_quantity_bins = int(1e6 // config['quantity_scale'])
         #self.quantity_emb = nn.Embedding(num_quantity_bins, d_model)
         self.quantity_emb = nn.Embedding(config['max_quantity'], d_model)
@@ -70,6 +73,8 @@ class SCMEmbedding(nn.Module):
         e_mat = self.mat_emb(tokens['material'])
         #e_method = self.method_emb(tokens['method'])
 
+        e_seq_in_demand = self.seq_in_demand_emb(tokens['seq_in_demand'])
+        e_total_in_demand = self.total_in_demand_emb(tokens['total_in_demand'])
 
         # Convert float quantity to bin index
         #quantity_bins = (tokens['quantity'].float() / config['quantity_scale']).long().clamp(min=0, max=self.quantity_emb.num_embeddings - 1)
@@ -86,7 +91,7 @@ class SCMEmbedding(nn.Module):
         e_child = self.mat_emb(tokens['child']) if 'child' in tokens else zero_embed
 
         e_combined = (
-            e_type + e_loc + e_src_loc + e_start + e_end + # e_time + 
+            e_type + e_loc + e_src_loc + e_start + e_end + e_seq_in_demand + e_total_in_demand + # e_time + 
             e_req + e_commit + e_demand + e_mat + e_qty + e_lead #+ e_method
         )
         e_bom = e_parent + e_child
@@ -99,6 +104,7 @@ class DemandPositionEmbedding(nn.Module):
         super().__init__()
         self.position_ratio_proj = nn.Linear(1, d_model)
         self.eod_proj = nn.Embedding(2, d_model)  # binary: [not_eod=0, eod=1]
+        self.dropout = nn.Dropout(config['dropout'])
 
     def forward(self, tgt_tokens):
         seq = tgt_tokens["seq_in_demand"].float()  # [B, T]
@@ -109,7 +115,7 @@ class DemandPositionEmbedding(nn.Module):
         eod_emb = self.eod_proj(eod)      # [B, T, d_model]
 
         ratio_emb = self.position_ratio_proj(ratio)  # [B, T, d_model]
-        return ratio_emb + eod_emb
+        return self.dropout(ratio_emb + eod_emb)
 
 # --- Transformer Model ---
 DEBUG_FORWARD = True
@@ -165,6 +171,10 @@ class SCMTransformerModel(nn.Module):
         #self.quantity_out = nn.Linear(d_model, int(1e6 // config['quantity_scale']))
         self.quantity_out = nn.Linear(d_model, config['max_quantity'])
 
+        self.eod_out = nn.Linear(d_model, 1)
+        self.seq_in_demand_out = nn.Linear(d_model, config['max_total_in_demand'])
+        self.total_in_demand_out = nn.Linear(d_model, config['max_total_in_demand'])
+
         #self.ref_id_out = nn.Linear(d_model, 64)  # Assume 64 is max number of ref_ids
         #self.depends_on_out = nn.Linear(d_model, 64)  # Same assumption
 
@@ -173,7 +183,7 @@ class SCMTransformerModel(nn.Module):
         assert (src_tokens['material'] < config['num_materials']).all(), "material_id out of range"
 
         src = self.embed(src_tokens)
-        tgt = self.embed(tgt_tokens)
+        tgt = self.embed(tgt_tokens) #+ DemandPositionEmbedding(tgt_tokens)
 
         memory = self.encoder(src)
 
@@ -217,6 +227,10 @@ class SCMTransformerModel(nn.Module):
             'lead_time': self.lead_time_out(decoded),            
 
             'quantity': self.quantity_out(decoded),
+
+            'eod': self.eod_out(decoded).squeeze(-1),
+            'seq_in_demand': self.seq_in_demand_out(decoded),
+            'total_in_demand': self.total_in_demand_out(decoded),
             #'quantity': quantity_pred, #self.quantity_out(decoded).squeeze(-1),
 
             #'method': self.method_out(decoded),
@@ -329,7 +343,7 @@ def restore_model(model=None):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = SCMTransformerModel(config).to(device)
 
-    depth = -1
+    depth = 0
     model_path = "models"
     if not os.path.exists(model_path):
         os.makedirs(model_path, exist_ok=True)

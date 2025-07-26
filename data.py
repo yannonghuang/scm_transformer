@@ -47,6 +47,9 @@ def generate_candidate_tokens(input_dict):
 
             "parent": 0,
             "child": 0,
+
+            "seq_in_demand": 0,
+            "total_in_demand": 0,            
         })
     return candidates
 
@@ -95,6 +98,9 @@ class SCMDataset(Dataset):
             "child": torch.zeros((len(df)), dtype=torch.long),
 
             "source_location": torch.tensor(df["location_id"].values, dtype=torch.long),
+
+            "seq_in_demand": torch.zeros((len(df)), dtype=torch.long),
+            "total_in_demand": torch.zeros((len(df)), dtype=torch.long),
         }
         return demand_dicts, tokens
 
@@ -133,6 +139,9 @@ class SCMDataset(Dataset):
 
             "parent": torch.zeros((len(df)), dtype=torch.long),
             "child": torch.zeros((len(df)), dtype=torch.long),
+
+            "seq_in_demand": torch.tensor(df["seq_in_demand"].values, dtype=torch.long),
+            "total_in_demand": torch.tensor(df["total_in_demand"].values, dtype=torch.long),
 
             #"token_type_id": torch.full((1, len(df)), 2, dtype=torch.long),
             #"token_type_id": torch.zeros((len(df)), dtype=torch.long),
@@ -237,6 +246,9 @@ def encode_tokens(token_list, token_type_id=1):
         #'token_type_id': torch.tensor([token_type_id] * len(token_list), dtype=torch.long)
 
         'lead_time': to_tensor("lead_time"),
+
+        'seq_in_demand': to_tensor("seq_in_demand"),
+        'total_in_demand': to_tensor("total_in_demand"),
     }
 
 # --- Updated Combined Input Token Generator ---

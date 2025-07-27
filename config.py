@@ -75,7 +75,7 @@ config = {
     'dropout': 0.1,
     'batch_size': 8,
     'lr': 1e-4,
-    'epochs': 100,
+    'epochs': 200,
     'checkpoint_name': 'scm_transformer',
     "max_train_samples": 1000,
     'quantity_scale': 1,  # updated to allow integer binning

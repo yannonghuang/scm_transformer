@@ -63,7 +63,8 @@ loss_weights = {
     # Sequence structure
     'eod': 2.0,                 # very important for stopping correctly
     'seq_in_demand': 1.5,       # helpful but secondary
-    'total_in_demand': 0.5      # likewise
+    'total_in_demand': 0.5,     # likewise
+    'successor': 2.0            # likewise
 }
 
 def learn(model, data_loader, device, optimizer=None):
@@ -85,7 +86,7 @@ def learn(model, data_loader, device, optimizer=None):
 
             loss_items = defaultdict(float)
 
-            for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time', 'seq_in_demand', 'total_in_demand']:
+            for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time', 'seq_in_demand', 'total_in_demand', 'successor']:
             #for k in ['quantity', 'type', 'demand', 'material', 'location', 'start_time', 'end_time', 'request_time', 'commit_time', 'lead_time']:
                 logits = last_pred[k]
                 target = labels[k][:, t]

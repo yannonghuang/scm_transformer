@@ -34,8 +34,8 @@ class SCMEmbedding(nn.Module):
         self.seq_in_demand_emb = nn.Embedding(config['max_total_in_demand'], d_model)
         self.total_in_demand_emb = nn.Embedding(config['max_total_in_demand'], d_model)
 
-        #num_quantity_bins = int(1e6 // config['quantity_scale'])
-        #self.quantity_emb = nn.Embedding(num_quantity_bins, d_model)
+        self.successor_emb = nn.Embedding(config['max_total_in_demand'], d_model)
+
         self.quantity_emb = nn.Embedding(config['max_quantity'], d_model)
 
         #self.quantity_proj = nn.Sequential(
@@ -75,7 +75,7 @@ class SCMEmbedding(nn.Module):
 
         e_seq_in_demand = self.seq_in_demand_emb(tokens['seq_in_demand'])
         e_total_in_demand = self.total_in_demand_emb(tokens['total_in_demand'])
-
+        e_successor = self.total_in_demand_emb(tokens['successor'])
         # Convert float quantity to bin index
         #quantity_bins = (tokens['quantity'].float() / config['quantity_scale']).long().clamp(min=0, max=self.quantity_emb.num_embeddings - 1)
         e_qty = self.quantity_emb(tokens['quantity'])
@@ -91,7 +91,7 @@ class SCMEmbedding(nn.Module):
         e_child = self.mat_emb(tokens['child']) if 'child' in tokens else zero_embed
 
         e_combined = (
-            e_type + e_loc + e_src_loc + e_start + e_end + e_seq_in_demand + e_total_in_demand + # e_time + 
+            e_type + e_loc + e_src_loc + e_start + e_end + e_seq_in_demand + e_total_in_demand + e_successor + # e_time + 
             e_req + e_commit + e_demand + e_mat + e_qty + e_lead #+ e_method
         )
         e_bom = e_parent + e_child
@@ -174,7 +174,7 @@ class SCMTransformerModel(nn.Module):
         self.eod_out = nn.Linear(d_model, 1)
         self.seq_in_demand_out = nn.Linear(d_model, config['max_total_in_demand'])
         self.total_in_demand_out = nn.Linear(d_model, config['max_total_in_demand'])
-
+        self.successor_out = nn.Linear(d_model, config['max_total_in_demand'])
         #self.ref_id_out = nn.Linear(d_model, 64)  # Assume 64 is max number of ref_ids
         #self.depends_on_out = nn.Linear(d_model, 64)  # Same assumption
 
@@ -231,14 +231,9 @@ class SCMTransformerModel(nn.Module):
             'eod': self.eod_out(decoded).squeeze(-1),
             'seq_in_demand': self.seq_in_demand_out(decoded),
             'total_in_demand': self.total_in_demand_out(decoded),
-            #'quantity': quantity_pred, #self.quantity_out(decoded).squeeze(-1),
-
-            #'method': self.method_out(decoded),
-            #'parent': self.material_out(decoded),
-            #'child': self.material_out(decoded),
-            #'parent': material_logits,
-            #'child': material_logits
+            'successor': self.successor_out(decoded)
         }
+        
         if tgt_tokens is not None:
             output_logits = apply_field_constraints(output_logits, src_tokens, tgt_tokens)
 

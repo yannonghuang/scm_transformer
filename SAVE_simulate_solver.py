@@ -32,7 +32,7 @@ def load_demands(path):
     return load_csv(path).to_dict(orient='records')
 
 # --- Work Order Creation ---
-def create_work_order(demand_id, method, start_time, end_time, quantity, seq_in_demand, successor):
+def create_work_order(demand_id, method, start_time, end_time, quantity):
     return {
         'demand_id': demand_id,
         'type': method['type'],
@@ -47,10 +47,7 @@ def create_work_order(demand_id, method, start_time, end_time, quantity, seq_in_
         'request_time': end_time,
         'commit_time': end_time,
         'lead_time': method.get('lead_time', None),
-        'seq_in_demand': seq_in_demand,
-        'successor': successor
     }
-
 
 # --- Recursive Solver ---
 def solve_demand(d, methods, bom, now):
@@ -59,8 +56,6 @@ def solve_demand(d, methods, bom, now):
     loc_id = d['location_id']
     req_time = d['request_time']
     quantity = d['quantity']
-    seq_in_demand = d['seq_in_demand']
-    successor = d['successor']
 
     key = (m_id, loc_id)
     if key not in methods:
@@ -75,18 +70,14 @@ def solve_demand(d, methods, bom, now):
     if method.type == get_token_type('move'): #move
         child_materials.append(m_id)
 
-    seq_child = seq_in_demand
     for c in child_materials:
     #for c in bom.get(m_id, []):
-        seq_child += 1
         c_demand = {
             'demand_id': demand_id,
             'material_id': c,
             'location_id': method['location_id'] if method.type == get_token_type('make') else method['source_location_id'],
             'request_time': max([req_time - method['lead_time'], now]), # req_time 
-            'quantity': quantity,
-            'seq_in_demand' : seq_child,
-            'successor': seq_in_demand
+            'quantity': quantity
         }
         solved_c, c_wos = solve_demand(c_demand, methods, bom, now)
         child_wos += c_wos
@@ -99,7 +90,7 @@ def solve_demand(d, methods, bom, now):
     start_time = max([req_time - method['lead_time'], *commit_times, now])
     end_time = start_time + method['lead_time']
 
-    wo = create_work_order(demand_id, method, start_time, end_time, quantity, seq_in_demand, successor)
+    wo = create_work_order(demand_id, method, start_time, end_time, quantity)
     d['commit_time'] = end_time
     d['start_time'] = end_time
     d['end_time'] = end_time
@@ -126,17 +117,13 @@ def main():
     now = 0
 
     for d in demands:
-        d['seq_in_demand'] = 1
-        d['successor'] = 0
         solved_d, wos = solve_demand(d, methods, bom, now)
 
-        solved_d['seq_in_demand'] = 0
-        solved_d['successor'] = None
         count = len(wos) + 2
-        rows.append({'type': get_token_type('demand'), **solved_d, 'total_in_demand': count})
+        rows.append({'type': get_token_type('demand'), **solved_d, 'seq_in_demand': 0, 'total_in_demand': count})
         #for wo in wos:
         for index, wo in enumerate(wos):
-            rows.append({'type': 'workorder', **wo, 'total_in_demand': count})
+            rows.append({'type': 'workorder', **wo, 'seq_in_demand': index + 1, 'total_in_demand': count})
         rows.append({'type': get_token_type('eod'), 'demand_id': d['demand_id'], 'seq_in_demand': count - 1, 'total_in_demand': count})
 
     pd.DataFrame(rows).to_csv(os.path.join(args.output, 'combined_output.csv'), index=False)

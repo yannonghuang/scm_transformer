@@ -210,11 +210,16 @@ def compute_attention_mask(src_tokens, tgt_tokens):
     same_demand = demand_ids.unsqueeze(2) == demand_ids.unsqueeze(1)  # [B, T, T]
     quantity = tgt_tokens['quantity']     # [B, T]
     same_quantity = quantity.unsqueeze(2) == quantity.unsqueeze(1)  # [B, T, T]
+    # successor mask:
+    seq = tgt_tokens['seq_in_demand'].unsqueeze(2)        # [B, T, 1]
+    succ = tgt_tokens['successor'].unsqueeze(1)           # [B, 1, T]
+    # Mask[i, j] = True if j is the successor of i
+    successor_mask = (succ == seq)                        # [B, T, T]
 
     temporal_check = build_temporal_mask(tgt_tokens)
     demand_check = build_demand_mask(tgt_tokens)
 
-    self_attention = self_attention & same_demand & same_quantity & temporal_check & demand_check
+    self_attention = self_attention & same_demand & same_quantity & successor_mask & temporal_check & demand_check
 
     self_attention = ~self_attention
 

@@ -49,7 +49,9 @@ def generate_candidate_tokens(input_dict):
             "child": 0,
 
             "seq_in_demand": 0,
-            "total_in_demand": 0,            
+            "total_in_demand": 0,    
+
+            "successor": 0,          
         })
     return candidates
 
@@ -101,6 +103,8 @@ class SCMDataset(Dataset):
 
             "seq_in_demand": torch.zeros((len(df)), dtype=torch.long),
             "total_in_demand": torch.zeros((len(df)), dtype=torch.long),
+
+            "successor": torch.zeros((len(df)), dtype=torch.long),
         }
         return demand_dicts, tokens
 
@@ -143,8 +147,8 @@ class SCMDataset(Dataset):
             "seq_in_demand": torch.tensor(df["seq_in_demand"].values, dtype=torch.long),
             "total_in_demand": torch.tensor(df["total_in_demand"].values, dtype=torch.long),
 
-            #"token_type_id": torch.full((1, len(df)), 2, dtype=torch.long),
-            #"token_type_id": torch.zeros((len(df)), dtype=torch.long),
+            "successor": torch.tensor(df["successor"].values, dtype=torch.long),
+
         }
  
         return tokens
@@ -249,6 +253,8 @@ def encode_tokens(token_list, token_type_id=1):
 
         'seq_in_demand': to_tensor("seq_in_demand"),
         'total_in_demand': to_tensor("total_in_demand"),
+
+        'successor': to_tensor("successor"),
     }
 
 # --- Updated Combined Input Token Generator ---

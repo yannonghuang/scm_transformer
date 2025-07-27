@@ -98,7 +98,7 @@ def mock_src_tokens():
 
     import pandas as pd
 
-    df = pd.read_csv("data/samples/depth_0/sample_0/demands.csv")
+    df = pd.read_csv("data/samples/depth_3/sample_0/demands.csv")
 
     _src_tokens = {
         "type":        torch.tensor([[0] * len(df)], device=device), # assuming 0 = demand
@@ -139,13 +139,11 @@ def mock_src_tokens():
 
         "seq_in_demand": torch.zeros((len(df)), dtype=torch.long),
         "total_in_demand": torch.zeros((len(df)), dtype=torch.long),
+        "successor": torch.zeros((len(df)), dtype=torch.long),
     }
     
     #return src_tokens
     return generate_encoder_input(src_tokens, istensor=True)
-
-
-
 
 
 def decode_tokens(tokens):

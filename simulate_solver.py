@@ -103,6 +103,7 @@ def solve_demand(d, methods, bom, now):
     d['commit_time'] = end_time
     d['start_time'] = end_time
     d['end_time'] = end_time
+    d['lead_time'] = 0
     #return d, child_wos + [wo]
     return d, [wo] + child_wos
 
@@ -137,7 +138,14 @@ def main():
         #for wo in wos:
         for index, wo in enumerate(wos):
             rows.append({'type': 'workorder', **wo, 'total_in_demand': count})
-        rows.append({'type': get_token_type('eod'), 'demand_id': d['demand_id'], 'seq_in_demand': count - 1, 'total_in_demand': count})
+        rows.append({'type': get_token_type('eod'), 'demand_id': d['demand_id'], 
+                    'seq_in_demand': count - 1, 'total_in_demand': count, 'successor': 0,
+                    'commit_time': solved_d['commit_time'],
+                    'start_time': solved_d['commit_time'],
+                    'end_time': solved_d['commit_time'],
+                    'lead_time': 0,
+                    'quantity': solved_d['quantity'],                     
+                     })
 
     pd.DataFrame(rows).to_csv(os.path.join(args.output, 'combined_output.csv'), index=False)
     print("✅ Simulation complete. Outputs saved to:", args.output)

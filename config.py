@@ -75,11 +75,12 @@ config = {
     'dropout': 0.1,
     'batch_size': 8,
     'lr': 1e-4,
-    'epochs': 200,
+    'epochs': 800,
     'checkpoint_name': 'scm_transformer',
+    'checkpoint_frequency': 100,
     "max_train_samples": 1000,
     'quantity_scale': 1,  # updated to allow integer binning
     'max_quantity': 100, #1e5
-    'use_attention': 1,
+    'use_attention': 0,
     "max_total_in_demand": 30
 }

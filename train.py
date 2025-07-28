@@ -115,10 +115,11 @@ def learn(model, data_loader, device, optimizer=None):
                     loss_items[k] = torch.tensor(1e9, device=device)
 
             eod_logits = last_pred['eod']
-            #eod_labels = (labels['type'][:, t] == get_token_type('eod')).float()
-            eod_labels = ((labels["seq_in_demand"][:, t] + 1) == labels["total_in_demand"][:, t]).float()
-            eod_loss = F.binary_cross_entropy_with_logits(eod_logits, eod_labels, reduction="mean")
-            loss_items['eod'] = eod_loss
+            if torch.isfinite(eod_logits.max()).item():
+                #eod_labels = (labels['type'][:, t] == get_token_type('eod')).float()
+                eod_labels = ((labels["seq_in_demand"][:, t] + 1) == labels["total_in_demand"][:, t]).float()
+                eod_loss = F.binary_cross_entropy_with_logits(eod_logits, eod_labels, reduction="mean")
+                loss_items['eod'] = eod_loss
                             
             for k, v in loss_items.items():
                 logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
@@ -158,9 +159,9 @@ def train_stepwise(model=None, depth=None):
     train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
 
+    check_count = 0
     model.train()
     for epoch in range(config['epochs']):
-        
         total_loss = learn(model, train_loader, device, optimizer)
 
         scheduler.step(total_loss)
@@ -180,5 +181,9 @@ def train_stepwise(model=None, depth=None):
         model.train()
         logger.info(f"🔍 Validation Loss: {val_loss:.4f}")
 
-    save_model(model, depth)
+        check_count += 1
+        if (check_count >= min(config['checkpoint_frequency'], config['epochs'])):  
+            save_model(model, depth)
+            check_count = 0
+    
 

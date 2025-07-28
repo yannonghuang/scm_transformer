@@ -142,7 +142,8 @@ class SCMTransformerModel(nn.Module):
 
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=config['n_layers'])
         
-        if config['use_attention'] == 0:
+        #if config['use_attention'] == 0:
+        if False:
             self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=config['n_layers'])
         else:
             # In __init__ of SCMTransformer
@@ -187,7 +188,8 @@ class SCMTransformerModel(nn.Module):
 
         memory = self.encoder(src)
 
-        if config['use_attention'] == 0:
+        #if config['use_attention'] == 0:
+        if False:
             decoded = self.decoder(tgt, memory)
         else:
             # Apply attention masks thru custom decoder layer
@@ -233,7 +235,7 @@ class SCMTransformerModel(nn.Module):
             'total_in_demand': self.total_in_demand_out(decoded),
             'successor': self.successor_out(decoded)
         }
-        
+
         if tgt_tokens is not None:
             output_logits = apply_field_constraints(output_logits, src_tokens, tgt_tokens)
 
@@ -350,8 +352,6 @@ def restore_model(model=None):
             last_depth = ((str(model_files[-1])).split('.')[0]).split('_')[-1]
             #max_depth = max([((str(p)).split('.')[0]).split('_')[-1] for p in model_files])
             logger.info(f"last depth = {last_depth}")
-
-            #depth = length - 1
             depth = int(last_depth)
             logger.info(f"Restore model from {model_files[-1]}")          
             model.load_state_dict(torch.load(model_files[-1]))

@@ -98,7 +98,7 @@ def mock_src_tokens():
 
     import pandas as pd
 
-    df = pd.read_csv("data/samples/depth_3/sample_0/demands.csv")
+    df = pd.read_csv("data/samples/depth_0/sample_0/demands.csv")
 
     _src_tokens = {
         "type":        torch.tensor([[0] * len(df)], device=device), # assuming 0 = demand

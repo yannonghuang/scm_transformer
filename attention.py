@@ -17,6 +17,61 @@ from collections import defaultdict
 from config import logger, config, get_token_type
 from utils import load_bom, load_bom_parent, get_method, get_method_lead_time
 
+def is_target_eod(tgt_tokens):
+    TYPE_EOD = get_token_type('eod')
+    return tgt_tokens['type'] == TYPE_EOD           # [B, T]
+
+def is_not_target_eod(tgt_tokens):
+    TYPE_EOD = get_token_type('eod')
+    # [B, T]
+    demand = tgt_tokens['type'] == get_token_type('demand')
+    make = tgt_tokens['type'] == get_token_type('make')
+    purchase = tgt_tokens['type'] == get_token_type('purchase')
+    move = tgt_tokens['type'] == get_token_type('move')
+
+    return demand | make | purchase | move
+
+def is_target_successor(tgt_tokens):
+    # successor mask:
+    seq = tgt_tokens['seq_in_demand'].unsqueeze(2)        # [B, T, 1]
+    succ = tgt_tokens['successor'].unsqueeze(1)           # [B, 1, T]
+
+    # Mask[i, j] = True if j is the successor of i
+    return (succ == seq)                        # [B, T, T]
+
+def compute_purchase_eod_mask(tgt_tokens):
+    purchase = tgt_tokens['type'] == get_token_type('purchase')     # [B, T]
+    eod = tgt_tokens['type'] == get_token_type('eod')     # [B, T]
+
+    purchase = purchase.unsqueeze(2)        # [B, T, 1]
+    eod = eod.unsqueeze(1)           # [B, 1, T]
+
+    return (purchase & eod)                        # [B, T, T]
+
+def compute_last_purchase_eod_bias(tgt_tokens):
+    # Assume:
+    # - tgt_tokens['type']: [B, T] where 0=purchase, 1=eod, etc.
+    # - tgt_tokens['seq_in_demand']: [B, T]
+    # - tgt_tokens['total_in_demand']: [B, T]
+
+    LARGE_POSITIVE_BIAS = 1000
+    is_eod = tgt_tokens['type'] == get_token_type('eod')
+    is_purchase = tgt_tokens['type'] == get_token_type('purchase')
+    seq = tgt_tokens['seq_in_demand']
+    total = tgt_tokens['total_in_demand']
+
+    # [B, T] → [B, T, 1] and [B, 1, T]
+    eod_mask = is_eod & (seq == total - 1)      # Only eod tokens
+    purchase_mask = is_purchase & (seq == total - 2)  # Last purchase
+
+    # [B, T, T]: eod attends to final purchase in same demand group
+    attention_bias = (
+        eod_mask.unsqueeze(2) & purchase_mask.unsqueeze(1)
+    )  # bias where i (query) is eod, j (key) is final purchase
+
+    # Scale and add to attention scores
+    attn_scores = attention_bias.float() * LARGE_POSITIVE_BIAS
+    return attn_scores
 
 def compute_simple_bom_mask(src_tokens, tgt_tokens, from_make_to_bom=True):
     B, S = src_tokens['type'].shape
@@ -47,11 +102,6 @@ def compute_simple_bom_mask(src_tokens, tgt_tokens, from_make_to_bom=True):
     #mask = type_match & material_match
     # Final boolean mask: True = allowed, False = disallowed
     mask_bool = type_match & material_match        # [B, T, S]
-
-    # Convert to float mask for additive attention
-    # True → 0.0, False → -inf
-    mask = torch.where(mask_bool, torch.tensor(0.0, device=mask_bool.device),
-                                  torch.tensor(float('-inf'), device=mask_bool.device))
 
     return mask_bool
 
@@ -148,13 +198,38 @@ def compute_simple_method_mask(src_tokens, tgt_tokens):
     
     return mask_bool_demand_to_method, mask_bool_method_to_workorder, mask_bool_method_to_workorder_ms, mask_bool_move_to_method
 
-def build_temporal_mask(tgt_tokens):
+def is_target_successor(tgt_tokens): # this one works "locally"
+    # successor mask:
+    seq = tgt_tokens['seq_in_demand'].unsqueeze(2)        # [B, T, 1]
+    succ = tgt_tokens['successor'].unsqueeze(1)           # [B, 1, T]
+
+    # Mask[i, j] = True if j is the successor of i
+    succ_mask = succ == seq
+    
+    #print("Successor pairs (i, j):", torch.nonzero(succ_mask[0]))
+    return succ_mask                        # [B, T, T]
+
+def build_temporal_mask(tgt_tokens): # this one works "locally"
     start_time = tgt_tokens['start_time']     # [B, T]
     end_time = tgt_tokens['end_time']     # [B, T]
-    good_ordering = start_time.unsqueeze(2) > end_time.unsqueeze(1)  # [B, T, T]
-    workorder_paced = (tgt_tokens['start_time'] + tgt_tokens['lead_time']) == tgt_tokens['end_time']  # [B, T]    
-    good_internals = workorder_paced.unsqueeze(2) & workorder_paced.unsqueeze(1)  # [B, T, T]
+
+    # [B, T, T]
+    good_ordering = (is_target_successor(tgt_tokens) & end_time.unsqueeze(2) <= start_time.unsqueeze(1))  
+
+    # [B, T]
+    token_paced = (
+            (tgt_tokens['start_time'] + tgt_tokens['lead_time']) == tgt_tokens['end_time']
+        ) & (
+            tgt_tokens['seq_in_demand'] > tgt_tokens['successor']
+        ) & (
+            (is_target_eod(tgt_tokens) & ((tgt_tokens['seq_in_demand'] + 1) == tgt_tokens['total_in_demand']))
+            | is_not_target_eod(tgt_tokens)
+        )        
+
+    good_internals = token_paced.unsqueeze(2) & token_paced.unsqueeze(1)  # [B, T, T]
+
     temporal_check = good_ordering & good_internals
+
     return temporal_check
 
 
@@ -176,13 +251,28 @@ def build_demand_mask(tgt_tokens: dict) -> torch.Tensor:
     # Causal mask: [T, T]
     causal_mask = torch.tril(torch.ones((T, T), dtype=torch.bool, device=demand_ids.device))  # [T, T]
 
-    # Compare demand_ids: [B, T, 1] <= [B, 1, T] -> [B, T, T]
+    ################ Compare demand_ids: [B, T, 1] <= [B, 1, T] -> [B, T, T]
     demand_mask = demand_ids.unsqueeze(2) >= demand_ids.unsqueeze(1)  # [B, T, T]
     #demand_mask = demand_ids.unsqueeze(2) <= demand_ids.unsqueeze(1)  # [B, T, T]
 
-    # Combine masks: broadcast causal_mask over batch
-    attn_mask = demand_mask & causal_mask.unsqueeze(0)  # [B, T, T]
+    ################ Combine masks: broadcast causal_mask over batch
+    attn_mask = (demand_mask & causal_mask.unsqueeze(0))  # [B, T, T]
     return attn_mask
+
+def build_sequence_mask(tgt_tokens: dict) -> torch.Tensor:
+    ################ Builds a self-attention mask such that each token can only attend to tokens with
+    # the same demand ID and an equal or earlier seq_in_demand value.
+
+    seq = tgt_tokens['seq_in_demand']         # [B, T]
+    seq_i = seq.unsqueeze(2)                  # [B, T, 1]
+    seq_j = seq.unsqueeze(1)                  # [B, 1, T]
+
+    # Only allow attention if demand matches and j.seq ≤ i.seq
+    seq_mask = (seq_j >= seq_i)  # [B, T, T]
+    #seq_mask = (demand_i == demand_j) & (seq_j >= seq_i)  # [B, T, T]
+
+    return seq_mask  # [B, T, T]
+
 
 def compute_method_mask(src_tokens, tgt_tokens):
     demand_to_method, method_to_workorder, method_to_workorder_ms, move_to_method = compute_simple_method_mask(src_tokens, tgt_tokens)
@@ -201,27 +291,25 @@ def compute_method_mask(src_tokens, tgt_tokens):
 def compute_attention_mask(src_tokens, tgt_tokens):
     make_to_bom, bom_to_make, make_to_make = compute_bom_mask(src_tokens, tgt_tokens)        
     demand_to_method, method_to_workorder, demand_to_workorder, move_to_method, method_to_workorder_ms, move_to_workorder = compute_method_mask(src_tokens, tgt_tokens)
+    purchase_eod = compute_purchase_eod_mask(tgt_tokens)
 
     cross_attention = demand_to_method | method_to_workorder | move_to_method | method_to_workorder_ms | make_to_bom | bom_to_make
-    self_attention = demand_to_workorder | move_to_workorder | make_to_make
+    self_attention = demand_to_workorder | move_to_workorder | make_to_make | purchase_eod
 
     # additional filters
     demand_ids = tgt_tokens['demand']     # [B, T]
     same_demand = demand_ids.unsqueeze(2) == demand_ids.unsqueeze(1)  # [B, T, T]
     quantity = tgt_tokens['quantity']     # [B, T]
     same_quantity = quantity.unsqueeze(2) == quantity.unsqueeze(1)  # [B, T, T]
-    # successor mask:
-    seq = tgt_tokens['seq_in_demand'].unsqueeze(2)        # [B, T, 1]
-    succ = tgt_tokens['successor'].unsqueeze(1)           # [B, 1, T]
-    # Mask[i, j] = True if j is the successor of i
-    successor_mask = (succ == seq)                        # [B, T, T]
 
     temporal_check = build_temporal_mask(tgt_tokens)
-    demand_check = build_demand_mask(tgt_tokens)
+    #inter_demand_check = build_demand_mask(tgt_tokens)
+    sequence_check = build_sequence_mask(tgt_tokens)
 
-    self_attention = self_attention & same_demand & same_quantity & successor_mask & temporal_check & demand_check
+    self_attention = self_attention & same_demand & same_quantity & sequence_check & temporal_check 
 
-    self_attention = ~self_attention
+    if config['use_attention'] == 0:
+        self_attention = torch.ones_like(self_attention)
 
     cross_attention_mask = torch.where(
         cross_attention,
@@ -235,46 +323,5 @@ def compute_attention_mask(src_tokens, tgt_tokens):
         torch.tensor(float('-inf'), device=self_attention.device)
     )
 
-    return cross_attention_mask, self_attention_mask
-
-
-    """
-    Returns a bias tensor of shape (B, T_tgt, T_src) where invalid attentions are masked with -inf.
-    src_tokens: dict of tensors for static method tokens, each of shape (B, T_src)
-    tgt_tokens: dict of tensors for predicted tokens, each of shape (B, T_tgt)
-    """
-    B, T_tgt = tgt_tokens['material'].shape
-    T_src = src_tokens['material'].shape[1]
-    
-    device = tgt_tokens['material'].device
-    attn_bias = torch.zeros(B, T_tgt, T_src, device=device)
-
-    for b in range(B):
-        for t in range(T_tgt):
-            tgt_material = tgt_tokens['material'][b, t].item()
-            tgt_type = tgt_tokens['type'][b, t].item()
-            tgt_location = tgt_tokens['location'][b, t].item()
-
-            for s in range(T_src):
-                src_material = src_tokens['material'][b, s].item()
-                src_type = src_tokens['type'][b, s].item()
-                src_location = src_tokens['location'][b, s].item()
-                src_lead_time = src_tokens['lead_time'][b, s].item()
-
-                if (
-                    tgt_material != src_material or
-                    tgt_type != src_type or
-                    tgt_location != src_location
-                ):
-                    attn_bias[b, t, s] = float('-inf')
-                    continue
-
-                # Optional: compare lead_time (based on start_time, end_time if available)
-                tgt_start = tgt_tokens['start_time'][b, t].item()
-                tgt_end = tgt_tokens['end_time'][b, t].item()
-                tgt_lead_time = tgt_start - tgt_end
-                if tgt_lead_time != src_lead_time:
-                    attn_bias[b, t, s] = float('-inf')
-
-    return attn_bias
-
+    return cross_attention_mask, self_attention_mask + compute_last_purchase_eod_bias(tgt_tokens)
+ 

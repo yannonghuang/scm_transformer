@@ -100,11 +100,11 @@ def learn(model, data_loader, device, optimizer=None):
                         logger.warning(f"⚠️ Invalid target for {k}: {target.tolist()} (logits.shape={logits.shape}, min={min_val}, max={max_val})")
                         raise ValueError("Target out of bounds")
 
-                    #if logits.max().item() > -1e4:
                     if torch.isfinite(logits.max()).item():
                         field_loss = F.cross_entropy(logits, target)
-                    if field_loss is not None and torch.isfinite(field_loss).item():
-                        loss_items[k] = field_loss
+                        #if field_loss is not None and torch.isfinite(field_loss).item():
+                        if torch.isfinite(field_loss).item():
+                            loss_items[k] = field_loss
 
                     #if not torch.isfinite(loss_items[k]):
                     #    raise ValueError("Non-finite loss")
@@ -112,14 +112,15 @@ def learn(model, data_loader, device, optimizer=None):
                     logger.error(f"❌ Skipping loss[{k}] due to {str(e)}")
                     logger.debug(f"  logits = {logits}")
                     logger.debug(f"  target = {target}")
-                    loss_items[k] = torch.tensor(1e9, device=device)
+                    #loss_items[k] = torch.tensor(1e9, device=device)
 
             eod_logits = last_pred['eod']
             if torch.isfinite(eod_logits.max()).item():
                 #eod_labels = (labels['type'][:, t] == get_token_type('eod')).float()
                 eod_labels = ((labels["seq_in_demand"][:, t] + 1) == labels["total_in_demand"][:, t]).float()
                 eod_loss = F.binary_cross_entropy_with_logits(eod_logits, eod_labels, reduction="mean")
-                loss_items['eod'] = eod_loss
+                if torch.isfinite(eod_loss.max()).item():
+                    loss_items['eod'] = eod_loss
                             
             for k, v in loss_items.items():
                 logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")

@@ -40,7 +40,7 @@ def main():
     elif args.train:
         train(args)
     elif args.predict:
-        _, _, model = restore_model()
+        _, model = restore_model()
         test_predict_plan(model)
 
         '''

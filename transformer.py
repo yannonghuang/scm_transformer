@@ -16,7 +16,7 @@ from collections import defaultdict
 
 from config import logger, config, get_token_type
 from utils import load_bom, load_bom_parent, get_method_lead_time
-from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints
+from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints, apply_eod_constraints
 from attention import compute_attention_mask
 
 # --- Embedding Module (Updated) ---
@@ -198,7 +198,7 @@ class SCMTransformerModel(nn.Module):
             cross_attention_mask = cross_attention_mask.expand(B * config['n_heads'], T, S)
             self_attention_mask = self_attention_mask.expand(B * config['n_heads'], T, T)
 
-            #cross_attention_mask = None
+            cross_attention_mask = None
             #self_attention_mask = None
 
             x = tgt  # [B, T_tgt, D]
@@ -240,7 +240,8 @@ class SCMTransformerModel(nn.Module):
             output_logits = apply_field_constraints(output_logits, src_tokens, tgt_tokens)
 
         output_logits = apply_demand_constraints(output_logits, src_tokens, tgt_tokens)
-        
+        output_logits = apply_eod_constraints(output_logits, tgt_tokens)
+
         def decode_val(key, out, use_argmax=True):
             val = out[key][0, -1]
             if key == 'type':

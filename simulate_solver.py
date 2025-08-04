@@ -32,7 +32,7 @@ def load_demands(path):
     return load_csv(path).to_dict(orient='records')
 
 # --- Work Order Creation ---
-def create_work_order(demand_id, method, start_time, end_time, quantity, seq_in_demand, successor):
+def create_work_order(demand_id, method, start_time, end_time, quantity, seq_in_demand, successor, request_time):
     return {
         'demand_id': demand_id,
         'type': method['type'],
@@ -44,7 +44,7 @@ def create_work_order(demand_id, method, start_time, end_time, quantity, seq_in_
         'start_time': start_time,
         'end_time': end_time,
         'quantity': quantity,
-        'request_time': end_time,
+        'request_time': request_time, #end_time,
         'commit_time': end_time,
         'lead_time': method.get('lead_time', None),
         'seq_in_demand': seq_in_demand,
@@ -99,7 +99,7 @@ def solve_demand(d, methods, bom, now):
     start_time = max([req_time - method['lead_time'], *commit_times, now])
     end_time = start_time + method['lead_time']
 
-    wo = create_work_order(demand_id, method, start_time, end_time, quantity, seq_in_demand, successor)
+    wo = create_work_order(demand_id, method, start_time, end_time, quantity, seq_in_demand, successor, req_time)
     d['commit_time'] = end_time
     d['start_time'] = end_time
     d['end_time'] = end_time
@@ -144,7 +144,9 @@ def main():
                     'start_time': solved_d['commit_time'],
                     'end_time': solved_d['commit_time'],
                     'lead_time': 0,
-                    'quantity': solved_d['quantity'],                     
+                    'quantity': solved_d['quantity'], 
+                    'material_id': solved_d['material_id'], 
+                    'location_id': solved_d['location_id'],                    
                      })
 
     pd.DataFrame(rows).to_csv(os.path.join(args.output, 'combined_output.csv'), index=False)

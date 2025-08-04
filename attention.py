@@ -107,6 +107,62 @@ def compute_last_purchase_eod_bias(tgt_tokens):
     attn_scores = attention_bias.float() * LARGE_POSITIVE_BIAS
     return attn_scores
 
+def compute_demand_eod_bias(tgt_tokens):
+    # Assume:
+    # - tgt_tokens['type']: [B, T] where 0=purchase, 1=eod, etc.
+    # - tgt_tokens['seq_in_demand']: [B, T]
+    # - tgt_tokens['total_in_demand']: [B, T]
+
+    is_eod = tgt_tokens['type'] == get_token_type('eod')
+    seq = tgt_tokens['seq_in_demand']
+    total = tgt_tokens['total_in_demand']
+    is_demand = tgt_tokens['type'] == get_token_type('demand')
+
+    # [B, T] → [B, T, 1] and [B, 1, T]
+    eod_mask = is_eod & (seq == total - 1)      # Only eod tokens
+    demand_mask = is_demand & (seq == 0) # Last purchase
+    '''
+    # [B, T, T]: eod attends to final purchase in same demand group
+    attention_bias = (
+        eod_mask.unsqueeze(2) & demand_mask.unsqueeze(1)
+    )  # bias where i (query) is eod, j (key) is final purchase
+    '''
+    # [B, T, T]: eod attends to final purchase in same demand group
+    attention_bias = (
+        demand_mask.unsqueeze(2) & eod_mask.unsqueeze(1)
+    )  # bias where j (key) is eod, i (query) is final purchase
+
+
+    # Scale and add to attention scores
+    attn_scores = attention_bias.float() * LARGE_POSITIVE_BIAS
+    return attn_scores
+
+def compute_demand_eod_mask(tgt_tokens):
+    # Assume:
+    # - tgt_tokens['type']: [B, T] where 0=purchase, 1=eod, etc.
+    # - tgt_tokens['seq_in_demand']: [B, T]
+    # - tgt_tokens['total_in_demand']: [B, T]
+
+    is_eod = tgt_tokens['type'] == get_token_type('eod')
+    seq = tgt_tokens['seq_in_demand']
+    total = tgt_tokens['total_in_demand']
+    is_demand = tgt_tokens['type'] == get_token_type('demand')
+
+    # [B, T] → [B, T, 1] and [B, 1, T]
+    eod_mask = is_eod & (seq == total - 1)      # Only eod tokens
+    demand_mask = is_demand & (seq == 0) # Last purchase
+    '''
+    # [B, T, T]: eod attends to final purchase in same demand group
+    attention_bias = (
+        eod_mask.unsqueeze(2) & demand_mask.unsqueeze(1)
+    )  # bias where i (query) is eod, j (key) is final purchase
+    '''
+    # [B, T, T]: eod attends to final purchase in same demand group
+    return (
+        demand_mask.unsqueeze(2) & eod_mask.unsqueeze(1)
+    )  # bias where j (key) is eod, i (query) is final purchase
+
+
 def compute_simple_bom_mask(src_tokens, tgt_tokens, from_make_to_bom=True):
     B, S = src_tokens['type'].shape
     _, T = tgt_tokens['type'].shape
@@ -249,6 +305,7 @@ def build_temporal_mask(tgt_tokens): # this one works "locally"
 
     # [B, T, T]
     good_ordering = (is_target_successor(tgt_tokens) & end_time.unsqueeze(2) <= start_time.unsqueeze(1))  
+    #good_ordering = is_target_successor(tgt_tokens) & start_time.unsqueeze(2) >= end_time.unsqueeze(1)
 
     '''
     # [B, T]
@@ -348,9 +405,10 @@ def compute_attention_mask(src_tokens, tgt_tokens):
     make_to_bom, bom_to_make, make_to_make = compute_bom_mask(src_tokens, tgt_tokens)        
     demand_to_method, method_to_workorder, demand_to_workorder, move_to_method, method_to_workorder_ms, move_to_workorder = compute_method_mask(src_tokens, tgt_tokens)
     purchase_eod = compute_purchase_eod_mask(tgt_tokens)
+    demand_eod = compute_demand_eod_mask(tgt_tokens)
 
     cross_attention = demand_to_method | method_to_workorder | move_to_method | method_to_workorder_ms | make_to_bom | bom_to_make
-    self_attention = demand_to_workorder | move_to_workorder | make_to_make | purchase_eod
+    self_attention = demand_to_workorder | move_to_workorder | make_to_make | demand_eod
 
     # additional filters
     demand_ids = tgt_tokens['demand']     # [B, T]
@@ -369,9 +427,13 @@ def compute_attention_mask(src_tokens, tgt_tokens):
 
     #self_attention = self_attention & same_demand & same_quantity & sequence_check & pace_check & temporal_check 
     self_attention_target = same_demand & same_quantity & same_total_in_demand & sequence_check & pace_check & temporal_check
+    #print(f"self_attention_target true count: {(self_attention_target).bool().sum().item()}")
     #print(f"self_attention true count: {(self_attention & is_target_successor(tgt_tokens)).bool().sum().item()}")
-    self_attention_scores = (self_attention & is_target_successor(tgt_tokens)).float() * LARGE_POSITIVE_BIAS
-    
+    self_attention_scores = (self_attention & is_target_successor(tgt_tokens) & same_demand).float() * LARGE_POSITIVE_BIAS
+    #print("self_attention & is_target_successor(tgt_tokens) & same_demand pairs (i, j):", torch.nonzero((self_attention & is_target_successor(tgt_tokens) & same_demand)[0]))
+    #print("compute_demand_eod_mask(tgt_tokens) pairs (i, j):", torch.nonzero(compute_demand_eod_mask(tgt_tokens)[0]))
+ 
+
     #self_attention = torch.ones_like(self_attention)
     #cross_attention = torch.ones_like(cross_attention)
 
@@ -390,5 +452,5 @@ def compute_attention_mask(src_tokens, tgt_tokens):
         torch.tensor(float('-inf'), device=self_attention.device)
     )
 
-    return cross_attention_mask, self_attention_mask + compute_last_purchase_eod_bias(tgt_tokens) + self_attention_scores
+    return cross_attention_mask, compute_last_purchase_eod_bias(tgt_tokens) + self_attention_scores + compute_demand_eod_bias(tgt_tokens) #+ self_attention_mask
  

@@ -16,7 +16,7 @@ from collections import defaultdict
 
 from config import logger, config, get_token_type
 from utils import load_bom, load_bom_parent, get_method_lead_time
-from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints, apply_eod_constraints
+from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints, apply_eod_constraints, apply_constraints
 from attention import compute_attention_mask
 
 # --- Embedding Module (Updated) ---
@@ -194,6 +194,9 @@ class SCMTransformerModel(nn.Module):
         else:
             # Apply attention masks thru custom decoder layer
             cross_attention_mask, self_attention_mask = compute_attention_mask(src_tokens, tgt_tokens)
+
+            #print("🎯 self_attention_mask.shape = ", self_attention_mask.shape, "T = ", tgt_tokens['type'].shape[1])
+
             B, T, S = cross_attention_mask.shape
             cross_attention_mask = cross_attention_mask.expand(B * config['n_heads'], T, S)
             self_attention_mask = self_attention_mask.expand(B * config['n_heads'], T, T)
@@ -236,12 +239,16 @@ class SCMTransformerModel(nn.Module):
             'successor': self.successor_out(decoded)
         }
 
+        '''
         if tgt_tokens is not None:
             output_logits = apply_field_constraints(output_logits, src_tokens, tgt_tokens)
 
         output_logits = apply_demand_constraints(output_logits, src_tokens, tgt_tokens)
         output_logits = apply_eod_constraints(output_logits, tgt_tokens)
+        '''
 
+        #output_logits = apply_constraints(output_logits, src_tokens, tgt_tokens, train_mode=True)
+                         
         def decode_val(key, out, use_argmax=True):
             val = out[key][0, -1]
             if key == 'type':
@@ -318,6 +325,9 @@ class BOMAwareDecoderLayer(nn.Module):
 
     def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None, attn_bom_mask=None):
         # Self-attention
+        #if tgt_mask is not None:
+        #    print("✅ Self-attention mask passed to decoder layer:", tgt_mask.shape, tgt_mask[0])
+
         tgt2 = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask,
                               key_padding_mask=tgt_key_padding_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
@@ -363,4 +373,3 @@ def save_model(model, depth):
     model_file_name = f"models/{config['checkpoint_name']}_depth_{depth}.pt"
     torch.save(model.state_dict(), model_file_name)
     logger.info(f"✅ Model saved to {model_file_name}")
-

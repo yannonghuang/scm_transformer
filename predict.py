@@ -1,16 +1,11 @@
 import torch
-from constraint import apply_bom_mask, apply_field_constraints, apply_demand_constraints
+from constraint import apply_bom_mask, apply_field_constraints, apply_demand_constraints, apply_eod_constraints, apply_constraints
 from config import get_token_type, get_token_label
 from data import generate_encoder_input
 
-
-import torch
-from constraint import apply_bom_mask, apply_field_constraints, apply_demand_constraints
-from config import get_token_type, get_token_label
-from data import generate_encoder_input
 
 @torch.no_grad()
-def predict_plan(model, src_tokens, max_steps=512):
+def NEW_predict_plan(model, src_tokens, max_steps=512):
     model.eval()
     device = src_tokens['type'].device
 
@@ -76,7 +71,7 @@ def predict_plan(model, src_tokens, max_steps=512):
     }
     return predicted_tokens
 
-def mock_src_tokens():
+def NEW_mock_src_tokens():
     import pandas as pd
     df = pd.read_csv("data/samples/depth_0/sample_0/demands.csv")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -105,7 +100,7 @@ def mock_src_tokens():
     return generate_encoder_input(src_tokens, istensor=True)
 
 @torch.no_grad()
-def _predict_plan(model, src_tokens, max_steps=512):
+def predict_plan(model, src_tokens, max_steps=512):
     model.eval()
     device = src_tokens['type'].device
 
@@ -114,7 +109,7 @@ def _predict_plan(model, src_tokens, max_steps=512):
             src_tokens[k] = src_tokens[k].unsqueeze(0)
 
     # Initial output sequence (batch size 1)
-    prev_tokens = {k: [0] for k in src_tokens if k not in ["parent", "child", "method"]}
+    prev_tokens = {k: [] for k in src_tokens if k not in ["parent", "child", "method"]}
     planned_demand_ids = set()
     step = 0
 
@@ -150,9 +145,12 @@ def _predict_plan(model, src_tokens, max_steps=512):
 
             logits_dict = model(src_tokens, tgt_tokens)
 
-            apply_bom_mask(logits_dict['material'], src_tokens, tgt_tokens)
-            apply_field_constraints(logits_dict, src_tokens, tgt_tokens)
-            apply_demand_constraints(logits_dict, src_tokens, tgt_tokens)
+            #apply_bom_mask(logits_dict['material'], src_tokens, tgt_tokens)
+            #apply_field_constraints(logits_dict, src_tokens, tgt_tokens, train_mode=False)
+            #apply_demand_constraints(logits_dict, src_tokens, tgt_tokens, train_mode=False)
+            #apply_eod_constraints(logits_dict, prev_tokens, train_mode=True)
+
+            #apply_constraints(logits_dict, src_tokens, tgt_tokens, train_mode=False)
 
             next_token = {
                 k: torch.argmax(logits_dict[k][0, -1]).item()
@@ -172,7 +170,7 @@ def _predict_plan(model, src_tokens, max_steps=512):
     }
     return predicted_tokens
 
-def _mock_src_tokens():
+def mock_src_tokens():
     """Creates a mock source with two demands."""
     B, S = 1, 5  # Batch size 1, 5 tokens max
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -181,39 +179,10 @@ def _mock_src_tokens():
         return [0] * (S - length)
 
     # Fields: all have shape (B, S)
-    _src_tokens = {
-        'type': torch.tensor([[get_token_type('demand'), get_token_type('demand')] + pad(2)], device=device),
-        'material': torch.tensor([[2, 5] + pad(2)], device=device),
-        'location': torch.tensor([[3, 3] + pad(2)], device=device),
-        'source_location': torch.tensor([[3, 3] + pad(2)], device=device),
-        'demand': torch.tensor([[5, 8] + pad(2)], device=device),
-        'quantity': torch.tensor([[5, 8] + pad(2)], device=device),
-        'start_time': torch.tensor([[2, 4] + pad(2)], device=device),
-        'end_time': torch.tensor([[6, 10] + pad(2)], device=device),
-        'request_time': torch.tensor([[6, 10] + pad(2)], device=device),
-        'commit_time': torch.tensor([[6, 10] + pad(2)], device=device),
-        'lead_time': torch.tensor([[6, 10] + pad(2)], device=device),                          
-    }
 
     import pandas as pd
 
     df = pd.read_csv("data/samples/depth_0/sample_0/demands.csv")
-
-    _src_tokens = {
-        "type":        torch.tensor([[0] * len(df)], device=device), # assuming 0 = demand
-        "material":    torch.tensor([df["material_id"].tolist()], device=device),
-        "location":    torch.tensor([df["location_id"].tolist()],device=device),
-        "source_location":    torch.tensor([df["location_id"].tolist()],device=device),
-        "quantity":    torch.tensor([df["quantity"].tolist()], device=device),
-        "request_time":  torch.tensor([df["request_time"].tolist()], device=device),
-        #"end_time":   [(r + 4) for r in df["request_time"]],  # mock commit_time = request + 4
-        "demand":      torch.tensor([df["demand_id"].tolist()], device=device),
-
-        "start_time":  torch.tensor([[0] * len(df)], device=device),
-        "end_time":  torch.tensor([[0] * len(df)], device=device),
-        "commit_time":  torch.tensor([[0] * len(df)], device=device),
-        "lead_time":  torch.tensor([[0] * len(df)], device=device),
-    }
 
     src_tokens = {
         "demand": torch.tensor(df["demand_id"].values, dtype=torch.long), 

@@ -285,5 +285,6 @@ def generate_encoder_input(input_dict, istensor=False):
         elif static_val is not None and dynamic_val is not None:
             combined[k] = torch.cat([static_val, dynamic_val], dim=0)
 
+    #print("combined.shape:", combined['type'].shape)
     return combined
 

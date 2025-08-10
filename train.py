@@ -24,7 +24,7 @@ from utils import get_max_depth, load_bom_graph
 
 loss_weights = {
     # Core action decisions
-    'type': 2.0,                # pick make/move/purchase correctly
+    'type': 5.0,                # pick make/move/purchase correctly
     'material': 2.0,            # critical to right output
     'location': 1.5,            # mildly less critical than material
 
@@ -194,7 +194,7 @@ def train(args):
         train_stepwise(model, next_depth)
         depth += 1
 
-def learn(model, data_loader, device, optimizer=None):
+def NEW_learn(model, data_loader, device, optimizer=None):
     total_loss = 0.0
     model.train() if optimizer is not None else model.eval()
 
@@ -272,7 +272,7 @@ def learn(model, data_loader, device, optimizer=None):
 
     return total_loss
 
-def train_stepwise(model=None, depth=None):
+def NEW_train_stepwise(model=None, depth=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 🌱 Initialize model if not provided
@@ -328,7 +328,7 @@ def train_stepwise(model=None, depth=None):
             logger.info(f"💾 Model checkpoint saved (depth={depth}, epoch={epoch})")
             check_count = 0
 
-def _learn(model, data_loader, device, optimizer=None):
+def learn(model, data_loader, device, optimizer=None):
     total_loss = 0.0
     for src, tgt, labels in data_loader:
         src = {k: v.to(device) for k, v in src.items()}
@@ -397,6 +397,8 @@ def _learn(model, data_loader, device, optimizer=None):
                     logger.info(f"🔍 Loss[{k}]: {v.item():.4f}")
 
             loss = sum(loss_weights[k] * loss_items[k] for k in loss_items)
+            if not isinstance(loss, torch.Tensor):
+                loss = torch.tensor(float(loss), device=device, requires_grad=True)
 
             loss_accum += loss
             for key in tgt_tokens:
@@ -413,7 +415,7 @@ def _learn(model, data_loader, device, optimizer=None):
 
     return total_loss
 
-def _train_stepwise(model=None, depth=None):
+def train_stepwise(model=None, depth=None):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if model is None:

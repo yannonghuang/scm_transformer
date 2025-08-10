@@ -51,7 +51,7 @@ def apply_bom_mask(logits, src_tokens, tgt_tokens):
     return logits + allowed_mask
 
 
-def apply_field_constraints(logits_dict, src_tokens, prev_tokens):
+def _apply_field_constraints(logits_dict, src_tokens, prev_tokens):
     def disable_logits(b, t):
         for field in logits_dict:
             if field != 'eod':
@@ -175,7 +175,7 @@ def apply_field_constraints(logits_dict, src_tokens, prev_tokens):
 
     return logits_dict
 
-def apply_eod_constraints(logits_dict, prev_tokens):
+def _apply_eod_constraints(logits_dict, prev_tokens):
     B, T = prev_tokens['type'].shape[:2]
     purchase_type = get_token_type('purchase')
     eod_type = get_token_type('eod')
@@ -212,7 +212,7 @@ def apply_eod_constraints(logits_dict, prev_tokens):
 
     return logits_dict
 
-def apply_demand_constraints(logits_dict, src_tokens, prev_tokens):
+def _apply_demand_constraints(logits_dict, src_tokens, prev_tokens):
     B, T = prev_tokens['type'].shape[:2]
     demand_type = get_token_type('demand')
     eod_type = get_token_type('eod')  # End-of-demand token
@@ -273,6 +273,446 @@ def apply_demand_constraints(logits_dict, src_tokens, prev_tokens):
     '''                
     return logits_dict
 
+def apply_field_constraints(logits_dict, src_tokens, prev_tokens, train_mode=True):
+    def disable_logits(b, t):
+        for field in logits_dict:
+            if field != 'eod':
+                logits_dict[field][b, t, :] = float('-inf')
+
+    B, T = prev_tokens['type'].shape[:2]
+    workorder_types = {
+        get_token_type('make'),
+        get_token_type('purchase'),
+        get_token_type('move'),
+        get_token_type('eod')
+    }
+
+    valid_types = workorder_types | {get_token_type('demand')}
+
+    bom = extract_bom_parent_from_tokens(src_tokens)
+    method_maps = extract_method_from_tokens(src_tokens)
+
+    for b in range(B):
+        for t in range(T):
+            token = {k: prev_tokens[k][b][t].item() for k in prev_tokens}
+            op_type = token['type']
+
+            # 🚫 Block all non-valid types in inference
+            if not train_mode:
+                type_logits = logits_dict['type']
+                for i in range(type_logits.shape[-1]):
+                    if i not in valid_types:
+                        type_logits[b, t, i] = float('-inf')
+
+            # 👇 Allow demand as-is
+            if op_type not in workorder_types:
+                if token["type"] != get_token_type('demand') or token["quantity"] == 0:
+                    disable_logits(b, t)
+                continue
+
+            material = token["material"]
+            demand = token["demand"]
+            location = token["location"]
+
+            method_key = (material, location, op_type)
+            method = method_maps.get(method_key, [])
+
+            if not method:
+                disable_logits(b, t)
+                continue
+
+            lead_time = method[0]['lead_time']
+            type_id = method[0]['type']
+            parents = bom.get(material, [])
+
+            parent_start_times = []
+            for t_prev in range(t):
+                prev = {k: prev_tokens[k][b][t_prev].item() for k in prev_tokens}
+
+                if prev["demand"] == demand and (
+                    (prev["type"] == get_token_type('make') and prev["material"] in parents) or
+                    (prev["type"] in {get_token_type('demand'), get_token_type('move')} and prev["material"] == material)
+                ):
+                    if prev["quantity"] == 0 or prev["material"] == 0:
+                        disable_logits(b, t)
+                        continue
+
+                    parent_start_times.append(prev["start_time"])
+
+                    # Hard constraints
+                    if not train_mode:
+                        logits_dict['material'][b, t, :] = float('-inf')
+                        logits_dict['material'][b, t, prev['material']] = 0.0
+
+                        logits_dict['quantity'][b, t, :] = float('-inf')
+                        logits_dict['quantity'][b, t, prev['quantity']] = 0.0
+
+                        logits_dict['demand'][b, t, :] = float('-inf')
+                        logits_dict['demand'][b, t, prev['demand']] = 0.0
+
+                        logits_dict['lead_time'][b, t, :] = float('-inf')
+                        logits_dict['lead_time'][b, t, int(lead_time)] = 0.0
+
+                        logits_dict['type'][b, t, :] = float('-inf')
+                        logits_dict['type'][b, t, int(type_id)] = 0.0
+
+                        # Location
+                        logits_dict['location'][b, t, :] = float('-inf')
+                        loc = prev['source_location'] if prev['type'] == get_token_type('move') else prev['location']
+                        logits_dict['location'][b, t, loc] = 0.0
+
+            if not parent_start_times:
+                disable_logits(b, t)
+                continue
+
+            max_end_time = max(min(parent_start_times), 0)
+            max_start_time = max(max_end_time - lead_time, 0)
+
+            mask_end = torch.arange(logits_dict["end_time"].shape[-1], device=logits_dict["end_time"].device) > max_end_time
+            mask_start = torch.arange(logits_dict["start_time"].shape[-1], device=logits_dict["start_time"].device) > max_start_time
+
+            logits_dict["end_time"][b, t][mask_end] = float('-inf')
+            logits_dict["start_time"][b, t][mask_start] = float('-inf')
+
+    return logits_dict
+
+
+def apply_eod_constraints(logits_dict, prev_tokens, train_mode=True):
+    if train_mode:
+        return logits_dict
+
+    B, T = prev_tokens['type'].shape[:2]
+    purchase_type = get_token_type('purchase')
+    eod_type = get_token_type('eod')
+
+    for b in range(B):
+        for t in range(1, T):
+            last_type = prev_tokens['type'][b][t - 1].item()
+            last_seq = prev_tokens['seq_in_demand'][b][t - 1].item()
+            total_seq = prev_tokens['total_in_demand'][b][t - 1].item()
+            last_demand = prev_tokens['demand'][b][t - 1].item()
+            last_quantity = prev_tokens['quantity'][b][t - 1].item()
+
+            is_last_purchase = last_type == purchase_type and last_seq == total_seq - 2
+
+            if is_last_purchase:
+                logits_dict['type'][b, t, :] = float('-inf')
+                logits_dict['type'][b, t, eod_type] = 0.0
+
+                logits_dict['seq_in_demand'][b, t, :] = float('-inf')
+                logits_dict['seq_in_demand'][b, t, total_seq - 1] = 0.0
+
+                logits_dict['total_in_demand'][b, t, :] = float('-inf')
+                logits_dict['total_in_demand'][b, t, total_seq] = 0.0
+
+                logits_dict['demand'][b, t, :] = float('-inf')
+                logits_dict['demand'][b, t, last_demand] = 0.0
+
+                logits_dict['quantity'][b, t, :] = float('-inf')
+                logits_dict['quantity'][b, t, last_quantity] = 0.0
+
+    return logits_dict
+
+
+def apply_demand_constraints(logits_dict, src_tokens, prev_tokens, train_mode=True):
+    if train_mode:
+        return logits_dict
+
+    B, T = prev_tokens['type'].shape[:2]
+    demand_type = get_token_type('demand')
+    eod_type = get_token_type('eod')
+
+    for b in range(B):
+        src_demands = [
+            src_tokens['demand'][b][i].item()
+            for i in range(src_tokens['type'].shape[1])
+            if src_tokens['type'][b][i].item() == demand_type
+        ]
+        if not src_demands:
+            continue
+
+        prev_demand_ids = [
+            prev_tokens['demand'][b][t].item()
+            for t in range(T)
+            if prev_tokens['type'][b][t].item() == demand_type
+        ]
+
+        unmet_demand_id = next((d for d in src_demands if d not in prev_demand_ids), None)
+
+        for t in range(T):
+            if unmet_demand_id is None:
+                logits_dict['type'][b, t, demand_type] = float('-inf')
+                continue
+
+            is_first = (t == 0)
+            last_token_type = prev_tokens['type'][b][t - 1].item() if t > 0 else None
+            is_after_eod = (last_token_type == eod_type)
+
+            if is_first or is_after_eod:
+                logits_dict['type'][b, t, :] = float('-inf')
+                logits_dict['type'][b, t, demand_type] = 0
+                logits_dict['demand'][b, t, :] = float('-inf')
+                logits_dict['demand'][b, t, unmet_demand_id] = 0
+            else:
+                logits_dict['type'][b, t, demand_type] = float('-inf')
+
+    return logits_dict
+
+def apply_constraints(logits_dict, src_tokens, prev_tokens, train_mode=False):
+    def disable_logits(b, t):
+        for field in logits_dict:
+            if field != 'eod':
+                logits_dict[field][b, t, :] = float('-inf')
+
+    B, T = prev_tokens['type'].shape[:2]
+    workorder_types = {
+        get_token_type('make'),
+        get_token_type('purchase'),
+        get_token_type('move'),
+        get_token_type('eod')
+    }
+    demand_type = get_token_type('demand')
+
+    bom = extract_bom_parent_from_tokens(src_tokens)
+    method_maps = extract_method_from_tokens(src_tokens)
+
+    for b in range(B):
+        # track demand tokens already seen
+        src_demands = [src_tokens['demand'][b][i].item()
+                       for i in range(src_tokens['type'].shape[1])
+                       if src_tokens['type'][b][i].item() == demand_type]
+
+        prev_demand_ids = [prev_tokens['demand'][b][t].item()
+                           for t in range(T)
+                           if prev_tokens['type'][b][t].item() == demand_type]
+
+        unmet_demand_id = next((d for d in src_demands if d not in prev_demand_ids), None)
+
+        for t in range(T):
+            token = {k: prev_tokens[k][b][t].item() for k in prev_tokens}
+            op_type = token['type']
+
+            # enforce demand-token-only at t==0 or after EOD
+            is_first = (t == 0)
+            last_type = prev_tokens['type'][b][t - 1].item() if t > 0 else None
+            is_after_eod = (last_type == get_token_type('eod'))
+
+            if unmet_demand_id is not None:
+                if is_first or is_after_eod:
+                    logits_dict['type'][b, t, :] = float('-inf')
+                    logits_dict['type'][b, t, demand_type] = 0
+                    logits_dict['demand'][b, t, :] = float('-inf')
+                    logits_dict['demand'][b, t, unmet_demand_id] = 0
+                    continue
+                else:
+                    logits_dict['type'][b, t, demand_type] = float('-inf')
+
+            # enforce that after demand, only purchase/make/move/eod is allowed
+            if last_type == demand_type:
+                allowed = {
+                    get_token_type('purchase'),
+                    get_token_type('make'),
+                    get_token_type('move'),
+                    get_token_type('eod')
+                }
+                logits_dict['type'][b, t, :] = float('-inf')
+                for a in allowed:
+                    logits_dict['type'][b, t, a] = 0
+
+            # mask zero-quantity/material tokens unless eod
+            if (token['quantity'] == 0 or token['material'] == 0) and op_type != get_token_type('eod'):
+                disable_logits(b, t)
+                continue
+
+            if op_type not in workorder_types:
+                continue
+
+            material = token['material']
+            location = token['location']
+            demand = token['demand']
+
+            method_key = (material, location, op_type)
+            method = method_maps.get(method_key, [])
+            if not method:
+                disable_logits(b, t)
+                continue
+
+            lead_time = method[0]['lead_time']
+            method_type = method[0]['type']
+            parents = bom.get(material, [])
+
+            parent_start_times = []
+            for t_prev in range(t):
+                prev = {k: prev_tokens[k][b][t_prev].item() for k in prev_tokens}
+                if prev['demand'] == demand and (
+                    (prev['type'] == get_token_type('make') and prev['material'] in parents) or
+                    (prev['type'] in {get_token_type('demand'), get_token_type('move')} and prev['material'] == material)
+                ):
+                    if prev['quantity'] == 0 or prev['material'] == 0:
+                        disable_logits(b, t)
+                        continue
+
+                    # constrain fields to inherit from prev
+                    for field in ['material', 'quantity', 'demand']:
+                        logits_dict[field][b, t, :] = float('-inf')
+                        logits_dict[field][b, t, prev[field]] = 0.0
+
+                    logits_dict['lead_time'][b, t, :] = float('-inf')
+                    logits_dict['lead_time'][b, t, int(lead_time)] = 0.0
+
+                    logits_dict['type'][b, t, :] = float('-inf')
+                    logits_dict['type'][b, t, int(method_type)] = 0.0
+
+                    logits_dict['location'][b, t, :] = float('-inf')
+                    loc = prev['source_location'] if prev['type'] == get_token_type('move') else prev['location']
+                    logits_dict['location'][b, t, loc] = 0.0
+
+                    parent_start_times.append(prev['start_time'])
+
+            if not parent_start_times:
+                disable_logits(b, t)
+                continue
+
+            # apply time window constraints
+            max_end_time = max(min(parent_start_times), 0)
+            max_start_time = max(max_end_time - lead_time, 0)
+            L_end = logits_dict['end_time'].shape[-1]
+            L_start = logits_dict['start_time'].shape[-1]
+
+            mask_end = torch.arange(L_end, device=logits_dict['end_time'].device) > max_end_time
+            mask_start = torch.arange(L_start, device=logits_dict['start_time'].device) > max_start_time
+
+            logits_dict['end_time'][b, t][mask_end] = float('-inf')
+            logits_dict['start_time'][b, t][mask_start] = float('-inf')
+
+    return logits_dict
+
+def DEBUG_apply_constraints(logits_dict, src_tokens, prev_tokens, train_mode=False):
+    def disable_logits(b, t):
+        for field in logits_dict:
+            if field != 'eod':
+                logits_dict[field][b, t, :] = float('-inf')
+
+    B, T = prev_tokens['type'].shape[:2]
+    workorder_types = {
+        get_token_type('make'),
+        get_token_type('purchase'),
+        get_token_type('move'),
+        get_token_type('eod')
+    }
+    demand_type = get_token_type('demand')
+
+    bom = extract_bom_parent_from_tokens(src_tokens)
+    method_maps = extract_method_from_tokens(src_tokens)
+
+    for b in range(B):
+        src_demands = [src_tokens['demand'][b][i].item()
+                       for i in range(src_tokens['type'].shape[1])
+                       if src_tokens['type'][b][i].item() == demand_type]
+
+        prev_demand_ids = [prev_tokens['demand'][b][t].item()
+                           for t in range(T)
+                           if prev_tokens['type'][b][t].item() == demand_type]
+
+        unmet_demand_id = next((d for d in src_demands if d not in prev_demand_ids), None)
+
+        for t in range(T):
+            token = {k: prev_tokens[k][b][t].item() for k in prev_tokens}
+            op_type = token['type']
+            last_type = prev_tokens['type'][b][t - 1].item() if t > 0 else None
+            is_first = (t == 0)
+            is_after_eod = (last_type == get_token_type('eod'))
+
+            logger.debug(f"[b={b}, t={t}] token_type={op_type}, last_type={last_type}, unmet_demand_id={unmet_demand_id}")
+
+            if unmet_demand_id is not None:
+                if is_first or is_after_eod:
+                    logits_dict['type'][b, t, :] = float('-inf')
+                    logits_dict['type'][b, t, demand_type] = 0
+                    logits_dict['demand'][b, t, :] = float('-inf')
+                    logits_dict['demand'][b, t, unmet_demand_id] = 0
+                    continue
+                else:
+                    logits_dict['type'][b, t, demand_type] = float('-inf')
+
+            if last_type == demand_type:
+                allowed = {
+                    get_token_type('purchase'),
+                    get_token_type('make'),
+                    get_token_type('move'),
+                    get_token_type('eod')
+                }
+                logits_dict['type'][b, t, :] = float('-inf')
+                for a in allowed:
+                    logits_dict['type'][b, t, a] = 0
+
+            if (token['quantity'] == 0 or token['material'] == 0) and op_type != get_token_type('eod'):
+                logger.debug(f"[b={b}, t={t}] Disabling logits due to zero quantity/material.")
+                disable_logits(b, t)
+                continue
+
+            if op_type not in workorder_types:
+                continue
+
+            material = token['material']
+            location = token['location']
+            demand = token['demand']
+            method_key = (material, location, op_type)
+            method = method_maps.get(method_key, [])
+            if not method:
+                logger.debug(f"[b={b}, t={t}] ⚠️ No method found for {method_key}")
+                disable_logits(b, t)
+                continue
+
+            lead_time = method[0]['lead_time']
+            method_type = method[0]['type']
+            parents = bom.get(material, [])
+
+            parent_start_times = []
+            for t_prev in range(t):
+                prev = {k: prev_tokens[k][b][t_prev].item() for k in prev_tokens}
+                if prev['demand'] == demand and (
+                    (prev['type'] == get_token_type('make') and prev['material'] in parents) or
+                    (prev['type'] in {get_token_type('demand'), get_token_type('move')} and prev['material'] == material)
+                ):
+                    if prev['quantity'] == 0 or prev['material'] == 0:
+                        disable_logits(b, t)
+                        continue
+
+                    for field in ['material', 'quantity', 'demand']:
+                        logits_dict[field][b, t, :] = float('-inf')
+                        logits_dict[field][b, t, prev[field]] = 0.0
+
+                    logits_dict['lead_time'][b, t, :] = float('-inf')
+                    logits_dict['lead_time'][b, t, int(lead_time)] = 0.0
+
+                    logits_dict['type'][b, t, :] = float('-inf')
+                    logits_dict['type'][b, t, int(method_type)] = 0.0
+
+                    logits_dict['location'][b, t, :] = float('-inf')
+                    loc = prev['source_location'] if prev['type'] == get_token_type('move') else prev['location']
+                    logits_dict['location'][b, t, loc] = 0.0
+
+                    parent_start_times.append(prev['start_time'])
+
+            is_leaf = material not in bom or len(bom[material]) == 0
+            if not parent_start_times and not is_leaf:
+                logger.debug(f"[b={b}, t={t}] Skipping due to no parent start times and material not leaf")
+                disable_logits(b, t)
+                continue
+
+            max_end_time = max(min(parent_start_times), 0) if parent_start_times else 0
+            max_start_time = max(max_end_time - lead_time, 0)
+            L_end = logits_dict['end_time'].shape[-1]
+            L_start = logits_dict['start_time'].shape[-1]
+
+            mask_end = torch.arange(L_end, device=logits_dict['end_time'].device) > max_end_time
+            mask_start = torch.arange(L_start, device=logits_dict['start_time'].device) > max_start_time
+
+            logits_dict['end_time'][b, t][mask_end] = float('-inf')
+            logits_dict['start_time'][b, t][mask_start] = float('-inf')
+
+    return logits_dict
 
 def extract_method_from_tokens(src_tokens):
     B, L = src_tokens['type'].shape

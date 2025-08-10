@@ -153,3 +153,6 @@ def compute_material_depths(G):
         else:
             depths[node] = 1 + max(depths[child] for child in G.successors(node))
     return depths
+
+
+

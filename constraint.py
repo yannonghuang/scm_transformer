@@ -587,6 +587,117 @@ def apply_constraints(logits_dict, src_tokens, prev_tokens, train_mode=False):
 
     return logits_dict
 
+def apply_basic_constraints(prev_tokens, logits_dict=None):
+    """
+    Apply constraints so that tokens between each demand and its nearest
+    following eod share the same demand id and total_in_demand.
+
+    Args:
+        prev_tokens (dict): dict of token attributes, including:
+            - "type": LongTensor [B, T] (0 = demand, 8 = eod, others ignored)
+            - "demand": LongTensor [B, T] (demand id at demand tokens, undefined elsewhere)
+        logits_dict (dict): dict of {field: logits tensor [B, T, V_field]}
+            Must contain "demand" and "total_in_demand" entries.
+    Returns:
+        logits_dict (dict): updated in-place
+    """
+    B, T = prev_tokens["type"].shape
+
+    # Clone to avoid in-place modifications breaking graph
+    updated = {k: v.clone() for k, v in prev_tokens.items()}
+    
+    for b in range(B):
+        token_types   = prev_tokens["type"][b]    # [T]
+        demand_values = prev_tokens["demand"][b]  # [T]
+
+        demand_positions = (token_types == 0).nonzero(as_tuple=True)[0]
+        eod_positions    = (token_types == 8).nonzero(as_tuple=True)[0]
+        
+        for d_pos in demand_positions:
+            # nearest eod strictly after this demand
+            eod_after = eod_positions[eod_positions > d_pos]
+            if len(eod_after) == 0:
+                continue
+            e_pos = eod_after.min()
+
+            # span = tokens strictly between demand and eod
+            #span = torch.arange(d_pos + 1, e_pos, device=token_types.device)
+            span = torch.arange(d_pos, e_pos + 1, device=token_types.device)
+            if len(span) == 0:
+                continue
+
+            demand_id   = demand_values[d_pos].item()
+            total_count = len(span)
+
+            # Constraint 1: demand field
+            if logits_dict and "demand" in logits_dict:
+                logits_dict["demand"][b, span, :] = -float("inf")
+                logits_dict["demand"][b, span, demand_id] = 0.0
+
+            # Constraint 2: total_in_demand field
+            if logits_dict and "total_in_demand" in logits_dict:
+                logits_dict["total_in_demand"][b, span, :] = -float("inf")
+                logits_dict["total_in_demand"][b, span, total_count] = 0.0
+
+            # --- Constrain seq_in_demand logits (0-based) ---
+            if logits_dict and "seq_in_demand" in logits_dict:
+                for offset, t in enumerate(span):   # offset starts from 0
+                    logits_dict["seq_in_demand"][b, t, :] = -float("inf")
+                    logits_dict["seq_in_demand"][b, t, offset] = 0.0
+
+            # --- Update prev_tokens to reflect enforced constraints ---
+            updated["demand"][b, span] = demand_id
+            updated["total_in_demand"][b, span] = total_count
+            updated["seq_in_demand"][b, span]   = torch.arange(
+                total_count, device=token_types.device
+            )
+
+    return updated, logits_dict
+
+def _apply_basic_constraints(prev_tokens):
+    """
+    Apply constraints so that tokens between each demand and its nearest
+    following eod share the same demand id and total_in_demand.
+
+    Args:
+        prev_tokens (dict): dict of token attributes, including:
+            - "type": LongTensor [B, T] (0 = demand, 8 = eod, others ignored)
+            - "demand": LongTensor [B, T]
+            - "total_in_demand": LongTensor [B, T]
+
+    Returns:
+        prev_tokens (dict): updated in-place
+    """
+    B, T = prev_tokens["type"].shape
+
+    for b in range(B):
+        token_types   = prev_tokens["type"][b]    # [T]
+        demand_values = prev_tokens["demand"][b]  # [T]
+
+        demand_positions = (token_types == 0).nonzero(as_tuple=True)[0]
+        eod_positions    = (token_types == 8).nonzero(as_tuple=True)[0]
+
+        for d_pos in demand_positions:
+            # nearest eod strictly after this demand
+            eod_after = eod_positions[eod_positions > d_pos]
+            if len(eod_after) == 0:
+                continue
+            e_pos = eod_after.min()
+
+            # span includes demand .. eod
+            span = torch.arange(d_pos, e_pos + 1, device=token_types.device)
+            if len(span) == 0:
+                continue
+
+            demand_id   = demand_values[d_pos].item()
+            total_count = len(span)
+
+            # overwrite fields directly in prev_tokens
+            prev_tokens["demand"][b, span] = demand_id
+            prev_tokens["total_in_demand"][b, span] = total_count
+
+    return prev_tokens
+
 def DEBUG_apply_constraints(logits_dict, src_tokens, prev_tokens, train_mode=False):
     def disable_logits(b, t):
         for field in logits_dict:

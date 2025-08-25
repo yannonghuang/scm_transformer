@@ -1,5 +1,5 @@
 import torch
-from constraint import apply_bom_mask, apply_field_constraints, apply_demand_constraints, apply_eod_constraints, apply_constraints
+from constraint import apply_bom_mask, apply_field_constraints, apply_demand_constraints, apply_eod_constraints, apply_constraints, apply_basic_constraints
 from config import get_token_type, get_token_label
 from data import generate_encoder_input
 
@@ -151,6 +151,7 @@ def predict_plan(model, src_tokens, max_steps=512):
             #apply_eod_constraints(logits_dict, prev_tokens, train_mode=True)
 
             #apply_constraints(logits_dict, src_tokens, tgt_tokens, train_mode=False)
+            #apply_basic_constraints(logits_dict, tgt_tokens)
 
             next_token = {
                 k: torch.argmax(logits_dict[k][0, -1]).item()
@@ -168,7 +169,10 @@ def predict_plan(model, src_tokens, max_steps=512):
     predicted_tokens = {
         k: torch.tensor([v], device=device) for k, v in prev_tokens.items()
     }
+    #return predicted_tokens
+    predicted_tokens, _ = apply_basic_constraints(predicted_tokens)
     return predicted_tokens
+
 
 def mock_src_tokens():
     """Creates a mock source with two demands."""

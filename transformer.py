@@ -16,7 +16,7 @@ from collections import defaultdict
 
 from config import logger, config, get_token_type
 from utils import load_bom, load_bom_parent, get_method_lead_time
-from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints, apply_eod_constraints, apply_constraints
+from constraint import apply_field_constraints, apply_bom_mask, apply_demand_constraints, apply_eod_constraints, apply_constraints, apply_basic_constraints
 from attention import compute_attention_mask
 
 # --- Embedding Module (Updated) ---
@@ -248,6 +248,7 @@ class SCMTransformerModel(nn.Module):
         '''
 
         #output_logits = apply_constraints(output_logits, src_tokens, tgt_tokens, train_mode=True)
+        _, output_logits = apply_basic_constraints(tgt_tokens, output_logits)
                          
         def decode_val(key, out, use_argmax=True):
             val = out[key][0, -1]

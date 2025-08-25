@@ -43,13 +43,42 @@ def is_not_target_eod(tgt_tokens):
 
     return demand | make | purchase | move
 
-def is_target_successor(tgt_tokens):
+def _is_target_successor(tgt_tokens):
     # successor mask:
     seq = tgt_tokens['seq_in_demand'].unsqueeze(2)        # [B, T, 1]
     succ = tgt_tokens['successor'].unsqueeze(1)           # [B, 1, T]
 
     # Mask[i, j] = True if j is the successor of i
     return (succ == seq)                        # [B, T, T]
+
+def is_target_successor(tgt_tokens):
+    """
+    Successor mask with timing constraint.
+    
+    A token j is a successor of token i if:
+      - tgt_tokens["successor"][i] == tgt_tokens["seq_in_demand"][j]
+      - tgt_tokens["request_time"][i] == tgt_tokens["request_time"][j] - tgt_tokens["lead_time"][j]
+    
+    Returns:
+        mask: BoolTensor [B, T, T], where mask[b, i, j] = True if j is successor of i
+    """
+    # --- shape prep ---
+    seq   = tgt_tokens["seq_in_demand"].unsqueeze(2)      # [B, T, 1]
+    succ  = tgt_tokens["successor"].unsqueeze(1)          # [B, 1, T]
+
+    req   = tgt_tokens["request_time"]                    # [B, T]
+    lead  = tgt_tokens["lead_time"]                       # [B, T]
+
+    # expand for pairwise comparisons
+    req_i = req.unsqueeze(2)                              # [B, T, 1]
+    req_j = req.unsqueeze(1)                              # [B, 1, T]
+    lead_j = lead.unsqueeze(1)                            # [B, 1, T]
+
+    # --- conditions ---
+    id_match   = (succ == seq)                            # [B, T, T]
+    time_match = (req_i == (req_j - lead_j))              # [B, T, T]
+
+    return id_match & time_match
 
 def compute_next_sequence_mask(tgt_tokens):
     current = tgt_tokens['seq_in_demand'].unsqueeze(2)     # [B, T, 1]
@@ -319,7 +348,7 @@ def compute_simple_method_mask(src_tokens, tgt_tokens):
     
     return mask_bool_demand_to_method, mask_bool_method_to_workorder, mask_bool_method_to_workorder_ms, mask_bool_move_to_method
 
-def is_target_successor(tgt_tokens): # this one works "locally"
+def _is_target_successor(tgt_tokens): # this one works "locally"
     # successor mask:
     seq = tgt_tokens['seq_in_demand'].unsqueeze(2)        # [B, T, 1]
     succ = tgt_tokens['successor'].unsqueeze(1)           # [B, 1, T]
@@ -457,7 +486,7 @@ def compute_attention_mask(src_tokens, tgt_tokens):
     pace_check = build_pace_mask(tgt_tokens)
 
     #self_attention = self_attention & same_demand & same_quantity & sequence_check & pace_check & temporal_check 
-    self_attention_target = same_demand #& same_quantity & same_total_in_demand & sequence_check & pace_check #& temporal_check
+    self_attention_target = same_demand & same_quantity & same_total_in_demand #& sequence_check & pace_check #& temporal_check
     #self_attention_target = disable_diagonal(self_attention_target)
     #print(f"self_attention_target true count: {(self_attention_target).bool().sum().item()}")
     #print("self_attention_target pairs (i, j):", torch.nonzero(self_attention_target[0]))
@@ -499,7 +528,7 @@ def compute_attention_mask(src_tokens, tgt_tokens):
     
     #print("demand_eod & same_demand pairs (i, j):", torch.nonzero((demand_eod & same_demand)[0]))
 
-    return cross_attention_mask, self_attention_target_mask + demand_eod_mask #+ self_attention_mask 
+    return cross_attention_mask, self_attention_target_mask + demand_eod_mask + self_attention_mask 
  
 def disable_diagonal(mask):
     B, T, _ = mask.shape

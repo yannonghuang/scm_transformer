@@ -587,12 +587,13 @@ def apply_constraints(logits_dict, src_tokens, prev_tokens, train_mode=False):
 
     return logits_dict
 
-def apply_basic_constraints(prev_tokens, logits_dict=None):
+def apply_basic_constraints(src_tokens, prev_tokens, logits_dict=None):
     """
     Apply constraints so that tokens between each demand and its nearest
     following eod share the same demand id and total_in_demand.
 
     Args:
+        src_tokens (dict): dict of token attributes.
         prev_tokens (dict): dict of token attributes, including:
             - "type": LongTensor [B, T] (0 = demand, 8 = eod, others ignored)
             - "demand": LongTensor [B, T] (demand id at demand tokens, undefined elsewhere)
@@ -605,6 +606,29 @@ def apply_basic_constraints(prev_tokens, logits_dict=None):
 
     # Clone to avoid in-place modifications breaking graph
     updated = {k: v.clone() for k, v in prev_tokens.items()}
+
+# ---  lead_time constraint ---
+    method_maps = extract_method_from_tokens(src_tokens)
+
+    for b in range(B):
+        for t in range(T):
+            token = {k: prev_tokens[k][b][t].item() for k in prev_tokens}
+            lead_time = 0
+            op_type = token['type']
+            if op_type != get_token_type('demand'):
+                material = token["material"]
+                location = token["location"]
+                method_key = (material, location, op_type)
+                method = method_maps.get(method_key, [])
+                if not method:
+                    continue
+                lead_time = method[0]['lead_time']
+
+            if logits_dict and "lead_time" in logits_dict:
+                logits_dict['lead_time'][b, t, :] = float('-inf')
+                logits_dict['lead_time'][b, t, int(lead_time)] = 0.0
+            updated["lead_time"][b, t] = lead_time
+
     
     for b in range(B):
         token_types   = prev_tokens["type"][b]    # [T]
@@ -651,6 +675,44 @@ def apply_basic_constraints(prev_tokens, logits_dict=None):
             updated["seq_in_demand"][b, span]   = torch.arange(
                 total_count, device=token_types.device
             )
+
+        # --- Predecessor-Successor request_time constraint ---
+        if "successor" in updated and "request_time" in updated and "lead_time" in updated:
+            seq_ids       = updated["seq_in_demand"][b]    # [T]
+            demand_ids    = updated["demand"][b]
+            successors    = updated["successor"][b]
+            request_times = updated["request_time"][b]
+            lead_times    = updated["lead_time"][b]
+            token_types   = updated["type"][b]
+
+            demand_type_id = get_token_type("demand")
+
+            for t in range(T):
+                # skip demand tokens, since they don't have successors
+                if token_types[t].item() == demand_type_id:
+                    continue
+
+                succ_seq = successors[t].item()
+                demand   = demand_ids[t].item()
+
+                # find candidate successor token within the same demand block
+                cand = (demand_ids == demand) & (seq_ids == succ_seq)
+                succ_positions = cand.nonzero(as_tuple=True)[0]
+                if len(succ_positions) == 0:
+                    continue
+
+                s = succ_positions.min().item()
+
+                # enforce request_time consistency
+                enforced_time = request_times[s] - lead_times[s]
+                request_times[t] = enforced_time
+
+                # --- sync with logits_dict ---
+                if logits_dict and "request_time" in logits_dict:
+                    logits_dict["request_time"][b, t, :] = -float("inf")
+                    logits_dict["request_time"][b, t, enforced_time] = 0.0
+
+            updated["request_time"][b] = request_times
 
     return updated, logits_dict
 

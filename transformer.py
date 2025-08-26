@@ -248,7 +248,7 @@ class SCMTransformerModel(nn.Module):
         '''
 
         #output_logits = apply_constraints(output_logits, src_tokens, tgt_tokens, train_mode=True)
-        _, output_logits = apply_basic_constraints(tgt_tokens, output_logits)
+        _, output_logits = apply_basic_constraints(src_tokens, tgt_tokens, output_logits)
                          
         def decode_val(key, out, use_argmax=True):
             val = out[key][0, -1]

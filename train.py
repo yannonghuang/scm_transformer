@@ -347,16 +347,19 @@ def learn(model, data_loader, device, optimizer=None):
             # Before model forward pass (to correct hard targets)
             tgt_tokens = enforce_demand_end_time_constraint(tgt_tokens)
 
-            tgt_tokens, _ = apply_basic_constraints(tgt_tokens)
+            tgt_tokens, _ = apply_basic_constraints(src, tgt_tokens)
 
             pred = model(src, tgt_tokens)
             last_pred = {k: v[:, -1] for k, v in pred.items()}
 
             loss_items = defaultdict(float)
 
-            for k in ['quantity', 'type', 'demand', 'material', 'location', 
-                      'start_time', 'end_time', 'commit_time', 
-                      'request_time', 'lead_time', 'seq_in_demand', 'total_in_demand', 'successor']:
+            for k in [
+                    #'quantity', 'type', 'demand', 'material', 'location', 
+                    #'start_time', 'end_time', 'commit_time', 
+                    'request_time', 'lead_time', 
+                    #'seq_in_demand', 'total_in_demand', 'successor'
+                    ]:
                 logits = last_pred[k]
                 target = labels[k][:, t]
                 max_val = target.max().item()

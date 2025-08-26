@@ -170,7 +170,7 @@ def predict_plan(model, src_tokens, max_steps=512):
         k: torch.tensor([v], device=device) for k, v in prev_tokens.items()
     }
     #return predicted_tokens
-    predicted_tokens, _ = apply_basic_constraints(predicted_tokens)
+    predicted_tokens, _ = apply_basic_constraints(src_tokens, predicted_tokens)
     return predicted_tokens
 
 
